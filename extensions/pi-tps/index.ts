@@ -129,10 +129,11 @@ function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null
   const ttftMs = timing.firstTokenMs - timing.turnStartMs;
   const totalMs = timing.lastTokenMs - timing.turnStartMs;
 
-  // Use accumulated active generation time (excludes tool execution gaps)
-  if (timing.totalGenerationMs <= 0) return null;
+  // Wall-clock time from turn start to completion (includes TTFT + tool gaps)
+  const wallClockMs = timing.lastTokenMs - timing.turnStartMs;
+  if (wallClockMs <= 0) return null;
 
-  const generationSeconds = timing.totalGenerationMs / 1000;
+  const generationSeconds = wallClockMs / 1000;
   const tps = output / generationSeconds;
 
   const ttftFormatted = formatDuration(ttftMs / 1000);

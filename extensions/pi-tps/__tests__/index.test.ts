@@ -489,7 +489,7 @@ describe('pi-tps extension', () => {
     expect(notification).toMatch(/\d+s · out |\d+m \d+s · out/); // Total time
   });
 
-  it('should exclude tool execution gaps from TPS calculation', async () => {
+  it('should calculate wall-clock TPS including TTFT and tool gaps', async () => {
     const turnStartEvent: TurnStartEvent = {
       type: 'turn_start',
       turnIndex: 0,
@@ -534,7 +534,7 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
-    // Simulate: tool execution gap should NOT count toward generation time
+    // Simulate: wall-clock from turn_start to agent_end (includes TTFT + tool gaps)
     handlers['turn_start']?.(turnStartEvent);
     await tick(100); // TTFT
 
@@ -543,7 +543,7 @@ describe('pi-tps extension', () => {
     await tick(200);
     handlers['message_end']?.({ type: 'message_end', message: firstMessage });
 
-    // TOOL EXECUTION GAP: 1000ms (should be excluded from TPS)
+    // TOOL EXECUTION GAP: 1000ms (now INCLUDED in wall-clock TPS)
     await tick(1000);
 
     // Second message: 400ms generation
@@ -561,15 +561,15 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
 
-    // TPS should be based on active generation time only: 1000 tokens / 0.6s = ~1666 TPS
-    // NOT based on wall-clock time: 1000 tokens / 1.7s = ~588 TPS
+    // Wall-clock TPS: 1000 tokens / ~1.7s (100+200+1000+400ms) = ~588 TPS
+    // This reflects user-perceived speed including TTFT and tool delays
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
 
-    // With the fix, TPS should be ~1666 (1000 tokens / 0.6s active generation)
-    // Without the fix, TPS would be ~588 (1000 tokens / 1.7s total)
-    expect(tps).toBeGreaterThan(1000); // Should be closer to 1666, not 588
+    // Should be ~588 (1000 tokens / 1.7s wall-clock), not ~1666 (raw LLM speed)
+    expect(tps).toBeLessThan(800); // Wall-clock includes gaps, so lower TPS
+    expect(tps).toBeGreaterThan(400); // But not absurdly low
     expect(notification).toContain('out 1,000'); // 200 + 800 tokens
     expect(notification).toContain('in 600'); // 100 + 500 tokens
   });
