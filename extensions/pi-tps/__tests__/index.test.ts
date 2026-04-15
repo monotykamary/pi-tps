@@ -5,6 +5,23 @@ import type {
   UIAPI,
   ExtensionContext,
 } from '@mariozechner/pi-coding-agent';
+
+// Event types not exported from main package - define locally
+interface TurnStartEvent {
+  type: 'turn_start';
+  turnIndex: number;
+  timestamp: number;
+}
+
+interface MessageStartEvent {
+  type: 'message_start';
+  message: unknown;
+}
+
+interface MessageEndEvent {
+  type: 'message_end';
+  message: unknown;
+}
 import type { AssistantMessage } from '@mariozechner/pi-ai';
 
 // Helper to advance time
@@ -54,39 +71,76 @@ describe('pi-tps extension', () => {
     vi.restoreAllMocks();
   });
 
-  it('should register agent_start, agent_end, and session_start handlers', () => {
+  it('should register all required event handlers', () => {
     expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
-    expect(mockPi.on).toHaveBeenCalledWith('agent_start', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('turn_start', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('message_start', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('message_end', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('agent_end', expect.any(Function));
   });
 
-  it('should show notification and save entry after agent_end', async () => {
-    const mockMessage: AssistantMessage = {
+  it('should show notification with TPS, TTFT, and total time', async () => {
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
+    };
+
+    const assistantMessage: AssistantMessage = {
       role: 'assistant',
-      content: 'Hello world',
+      content: [{ type: 'text', text: 'Hello world' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
       usage: {
         input: 100,
         output: 200,
         cacheRead: 50,
         cacheWrite: 25,
         totalTokens: 375,
+        cost: {
+          input: 0.001,
+          output: 0.002,
+          cacheRead: 0.0005,
+          cacheWrite: 0.00025,
+          total: 0.00375,
+        },
       },
+      stopReason: 'stop',
+      timestamp: Date.now(),
     };
 
-    const mockEvent: AgentEndEvent = {
-      messages: [mockMessage],
+    const messageStartEvent: MessageStartEvent = {
+      type: 'message_start',
+      message: assistantMessage,
     };
 
-    handlers['agent_start']?.();
-    await tick();
-    handlers['agent_end']?.(mockEvent, mockCtx);
+    const messageEndEvent: MessageEndEvent = {
+      type: 'message_end',
+      message: assistantMessage,
+    };
+
+    const agentEndEvent: AgentEndEvent = {
+      type: 'agent_end',
+      messages: [assistantMessage],
+    };
+
+    // Simulate the event sequence
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(100); // TTFT delay
+    handlers['message_start']?.(messageStartEvent);
+    await tick(500); // Generation time
+    handlers['message_end']?.(messageEndEvent);
+    handlers['agent_end']?.(agentEndEvent, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
-    expect(notification).toContain('TPS');
-    expect(notification).toContain('tok/s');
-    expect(notification).toContain('out 200');
-    expect(notification).toContain('in 100');
+
+    // Check format: TPS X.X tok/s · TTFT X.Xs · X.Xs · out X · in X
+    expect(notification).toMatch(/TPS \d+\.\d tok\/s/);
+    expect(notification).toMatch(/TTFT \d+\.\ds/);
+    expect(notification).toMatch(/out 200/);
+    expect(notification).toMatch(/in 100/);
 
     expect(appendEntrySpy).toHaveBeenCalledOnce();
     const [type, data] = appendEntrySpy.mock.calls[0];
@@ -99,20 +153,26 @@ describe('pi-tps extension', () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
-      data: { message: 'TPS 42.0 tok/s. out 100', timestamp: Date.now() },
+      data: {
+        message: 'TPS 42.0 tok/s · TTFT 1.2s · 5.0s · out 100 · in 50',
+        timestamp: Date.now(),
+      },
     });
 
     handlers['session_start']?.({ reason: 'switch' }, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
-    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s. out 100', 'info');
+    expect(notifySpy).toHaveBeenCalledWith(
+      'TPS 42.0 tok/s · TTFT 1.2s · 5.0s · out 100 · in 50',
+      'info'
+    );
   });
 
   it('should not restore notification on session start for new sessions', () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
-      data: { message: 'TPS 42.0 tok/s', timestamp: Date.now() },
+      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
     });
 
     handlers['session_start']?.({ reason: 'startup' }, mockCtx);
@@ -141,38 +201,78 @@ describe('pi-tps extension', () => {
   });
 
   it('should aggregate tokens from multiple assistant messages', async () => {
-    const mockMessages: AssistantMessage[] = [
-      {
-        role: 'assistant',
-        content: 'First',
-        usage: {
-          input: 50,
-          output: 100,
-          cacheRead: 25,
-          cacheWrite: 10,
-          totalTokens: 185,
-        },
-      },
-      {
-        role: 'assistant',
-        content: 'Second',
-        usage: {
-          input: 30,
-          output: 80,
-          cacheRead: 15,
-          cacheWrite: 5,
-          totalTokens: 130,
-        },
-      },
-    ];
-
-    const mockEvent: AgentEndEvent = {
-      messages: mockMessages,
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
     };
 
-    handlers['agent_start']?.();
-    await tick();
-    handlers['agent_end']?.(mockEvent, mockCtx);
+    const firstMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'First' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 50,
+        output: 100,
+        cacheRead: 25,
+        cacheWrite: 10,
+        totalTokens: 185,
+        cost: {
+          input: 0.001,
+          output: 0.002,
+          cacheRead: 0.0005,
+          cacheWrite: 0.00025,
+          total: 0.00375,
+        },
+      },
+      stopReason: 'toolUse',
+      timestamp: Date.now(),
+    };
+
+    const secondMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Second' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 30,
+        output: 80,
+        cacheRead: 15,
+        cacheWrite: 5,
+        totalTokens: 130,
+        cost: {
+          input: 0.001,
+          output: 0.002,
+          cacheRead: 0.0005,
+          cacheWrite: 0.00025,
+          total: 0.00375,
+        },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    // Simulate the event sequence
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(100);
+    handlers['message_start']?.({ type: 'message_start', message: firstMessage });
+    await tick(250);
+    handlers['message_end']?.({ type: 'message_end', message: firstMessage });
+    // Second message starts after first ends
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message: secondMessage });
+    await tick(200);
+    handlers['message_end']?.({ type: 'message_end', message: secondMessage });
+
+    const agentEndEvent: AgentEndEvent = {
+      type: 'agent_end',
+      messages: [firstMessage, secondMessage],
+    };
+
+    handlers['agent_end']?.(agentEndEvent, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
@@ -182,79 +282,181 @@ describe('pi-tps extension', () => {
 
   it('should skip notification when hasUI is false', async () => {
     const noUiCtx = { ...mockCtx, hasUI: false };
-    const mockEvent: AgentEndEvent = {
-      messages: [
-        {
-          role: 'assistant',
-          content: 'Hello',
-          usage: { input: 10, output: 20, totalTokens: 30 },
-        } as AssistantMessage,
-      ],
+
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
     };
 
-    handlers['agent_start']?.();
-    await tick();
-    handlers['agent_end']?.(mockEvent, noUiCtx);
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hello' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(100);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['agent_end']?.({ type: 'agent_end', messages: [assistantMessage] }, noUiCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
   });
 
   it('should skip notification when no output tokens', async () => {
-    const mockMessage: AssistantMessage = {
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
+    };
+
+    const assistantMessage: AssistantMessage = {
       role: 'assistant',
-      content: 'No tokens',
+      content: [{ type: 'text', text: 'No tokens' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
       usage: {
         input: 10,
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
         totalTokens: 10,
+        cost: { input: 0.001, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
       },
+      stopReason: 'stop',
+      timestamp: Date.now(),
     };
 
-    const mockEvent: AgentEndEvent = {
-      messages: [mockMessage],
-    };
-
-    handlers['agent_start']?.();
-    await tick();
-    handlers['agent_end']?.(mockEvent, mockCtx);
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(100);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['agent_end']?.({ type: 'agent_end', messages: [assistantMessage] }, mockCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
-  it('should ignore non-assistant messages', async () => {
-    const mockEvent: AgentEndEvent = {
-      messages: [
-        { role: 'user', content: 'Hello' } as unknown as AssistantMessage,
-        { role: 'system', content: 'System prompt' } as unknown as AssistantMessage,
-      ],
+  it('should ignore non-assistant messages for timing', async () => {
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
     };
 
-    handlers['agent_start']?.();
-    await tick();
-    handlers['agent_end']?.(mockEvent, mockCtx);
+    handlers['turn_start']?.(turnStartEvent);
+
+    // Send non-assistant messages - should not affect timing
+    handlers['message_start']?.({
+      type: 'message_start',
+      message: { role: 'user', content: 'Hello' },
+    });
+    await tick(100);
+    handlers['message_end']?.({ type: 'message_end', message: { role: 'user', content: 'Hello' } });
+    handlers['message_start']?.({
+      type: 'message_start',
+      message: { role: 'system', content: 'System' },
+    });
+    await tick(50);
+    handlers['message_end']?.({
+      type: 'message_end',
+      message: { role: 'system', content: 'System' },
+    });
+
+    // No assistant message = no notification
+    handlers['agent_end']?.({ type: 'agent_end', messages: [] }, mockCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
-  it('should skip notification when agent_start was not called', () => {
-    const mockEvent: AgentEndEvent = {
-      messages: [
-        {
-          role: 'assistant',
-          content: 'Hello',
-          usage: { input: 10, output: 20, totalTokens: 30 },
-        } as AssistantMessage,
-      ],
+  it('should skip notification when turn_start was not called', () => {
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hello' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
     };
 
-    // Don't call agent_start, just agent_end
-    handlers['agent_end']?.(mockEvent, mockCtx);
+    // Don't call turn_start, just agent_end
+    handlers['agent_end']?.({ type: 'agent_end', messages: [assistantMessage] }, mockCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
+  });
+
+  it('should calculate TTFT from turn_start to first message_start', async () => {
+    const startTime = Date.now();
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: startTime,
+    };
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Response' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 50,
+        output: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 150,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(500); // 500ms TTFT
+    const messageStartTime = Date.now();
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(1000); // 1000ms generation time
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+
+    const agentEndEvent: AgentEndEvent = {
+      type: 'agent_end',
+      messages: [assistantMessage],
+    };
+
+    handlers['agent_end']?.(agentEndEvent, mockCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+
+    // Should contain TTFT around 0.5s and total around 1.5s
+    expect(notification).toMatch(/TTFT 0\.\ds/);
+    expect(notification).toMatch(/1\.\ds · out/); // Total time
   });
 });
