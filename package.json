@@ -1,0 +1,48 @@
+{
+  "name": "pi-tps",
+  "version": "1.0.0",
+  "description": "Tokens-per-second tracker for pi — see your LLM generation speed after every agent turn",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint:dead": "knip --no-gitignore",
+    "postinstall": "simple-git-hooks"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx lint-staged",
+    "pre-push": "npm run typecheck && npm run test",
+    "commit-msg": "npx commitlint --edit ${1}"
+  },
+  "lint-staged": {
+    "*.{ts,js,json,md}": [
+      "prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.5.0",
+    "@commitlint/config-conventional": "^20.5.0",
+    "@types/node": "^25.5.0",
+    "@vitest/coverage-v8": "^4.1.2",
+    "knip": "^6.2.0",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.1",
+    "simple-git-hooks": "^2.13.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "^0.65.0",
+    "@mariozechner/pi-coding-agent": "^0.65.0"
+  }
+}
