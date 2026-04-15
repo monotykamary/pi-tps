@@ -200,7 +200,7 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledWith('TPS 50.0 tok/s recent', 'info');
   });
 
-  it('should aggregate tokens from multiple assistant messages', async () => {
+  it('should aggregate tokens from multiple assistant messages in current turn only', async () => {
     const turnStartEvent: TurnStartEvent = {
       type: 'turn_start',
       turnIndex: 0,
@@ -267,17 +267,46 @@ describe('pi-tps extension', () => {
     await tick(200);
     handlers['message_end']?.({ type: 'message_end', message: secondMessage });
 
+    // Agent end event includes ALL session messages (simulating long session)
+    // This tests that we only count messages that went through message_start/end
+    const historicalMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Historical from previous turns' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 1000,
+        output: 5000, // This should NOT be counted - it wasn't in the turn
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 6000,
+        cost: {
+          input: 0.001,
+          output: 0.002,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0.00375,
+        },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now() - 100000, // Old message
+    };
+
     const agentEndEvent: AgentEndEvent = {
       type: 'agent_end',
-      messages: [firstMessage, secondMessage],
+      // Session history includes old message + current turn messages
+      messages: [historicalMessage, firstMessage, secondMessage],
     };
 
     handlers['agent_end']?.(agentEndEvent, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
+    // Should only count current turn messages (100 + 80 = 180), not the 5000 from history
     expect(notification).toContain('out 180'); // 100 + 80
     expect(notification).toContain('in 80'); // 50 + 30
+    expect(notification).not.toContain('out 5'); // Should not include the 5000 historical tokens
   });
 
   it('should skip notification when hasUI is false', async () => {
@@ -458,6 +487,91 @@ describe('pi-tps extension', () => {
     // Should contain TTFT around 0-1s and total around 1-2s
     expect(notification).toMatch(/TTFT \d/);
     expect(notification).toMatch(/\d+s · out |\d+m \d+s · out/); // Total time
+  });
+
+  it('should exclude tool execution gaps from TPS calculation', async () => {
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
+    };
+
+    // First assistant message (tool call)
+    const firstMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Let me check that...' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 100,
+        output: 200,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 300,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'toolUse',
+      timestamp: Date.now(),
+    };
+
+    // Second assistant message (final response)
+    const secondMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Here is the detailed answer...' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 500,
+        output: 800,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 1300,
+        cost: { input: 0.005, output: 0.008, cacheRead: 0, cacheWrite: 0, total: 0.013 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    // Simulate: tool execution gap should NOT count toward generation time
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(100); // TTFT
+
+    // First message: 200ms generation
+    handlers['message_start']?.({ type: 'message_start', message: firstMessage });
+    await tick(200);
+    handlers['message_end']?.({ type: 'message_end', message: firstMessage });
+
+    // TOOL EXECUTION GAP: 1000ms (should be excluded from TPS)
+    await tick(1000);
+
+    // Second message: 400ms generation
+    handlers['message_start']?.({ type: 'message_start', message: secondMessage });
+    await tick(400);
+    handlers['message_end']?.({ type: 'message_end', message: secondMessage });
+
+    const agentEndEvent: AgentEndEvent = {
+      type: 'agent_end',
+      messages: [firstMessage, secondMessage],
+    };
+
+    handlers['agent_end']?.(agentEndEvent, mockCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+
+    // TPS should be based on active generation time only: 1000 tokens / 0.6s = ~1666 TPS
+    // NOT based on wall-clock time: 1000 tokens / 1.7s = ~588 TPS
+    const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
+    expect(tpsMatch).toBeTruthy();
+    const tps = parseFloat(tpsMatch![1]);
+
+    // With the fix, TPS should be ~1666 (1000 tokens / 0.6s active generation)
+    // Without the fix, TPS would be ~588 (1000 tokens / 1.7s total)
+    expect(tps).toBeGreaterThan(1000); // Should be closer to 1666, not 588
+    expect(notification).toContain('out 1,000'); // 200 + 800 tokens
+    expect(notification).toContain('in 600'); // 100 + 500 tokens
   });
 });
 

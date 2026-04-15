@@ -37,6 +37,9 @@ interface TurnTiming {
   turnStartMs: number;
   firstTokenMs: number | null;
   lastTokenMs: number | null;
+  totalGenerationMs: number; // Accumulated active generation time only
+  currentMessageStartMs: number | null; // Track when current message started
+  assistantMessages: AssistantMessage[]; // Messages generated in THIS turn only
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -104,15 +107,15 @@ export function formatDuration(totalSeconds: number): string {
 }
 
 function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null {
-  // Aggregate token usage from all assistant messages
+  // Aggregate token usage ONLY from assistant messages generated in this turn
+  // (not all messages from the session history)
   let input = 0;
   let output = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
   let totalTokens = 0;
 
-  for (const message of event.messages) {
-    if (!isAssistantMessage(message)) continue;
+  for (const message of timing.assistantMessages) {
     input += message.usage.input || 0;
     output += message.usage.output || 0;
     cacheRead += message.usage.cacheRead || 0;
@@ -124,12 +127,12 @@ function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null
   if (!timing.firstTokenMs || !timing.lastTokenMs) return null;
 
   const ttftMs = timing.firstTokenMs - timing.turnStartMs;
-  const generationMs = timing.lastTokenMs - timing.firstTokenMs;
   const totalMs = timing.lastTokenMs - timing.turnStartMs;
 
-  if (generationMs <= 0) return null;
+  // Use accumulated active generation time (excludes tool execution gaps)
+  if (timing.totalGenerationMs <= 0) return null;
 
-  const generationSeconds = generationMs / 1000;
+  const generationSeconds = timing.totalGenerationMs / 1000;
   const tps = output / generationSeconds;
 
   const ttftFormatted = formatDuration(ttftMs / 1000);
@@ -170,6 +173,9 @@ export default function tpsExtension(pi: ExtensionAPI) {
       turnStartMs: event.timestamp,
       firstTokenMs: null,
       lastTokenMs: null,
+      totalGenerationMs: 0,
+      currentMessageStartMs: null,
+      assistantMessages: [],
     };
     hasSeenAssistantMessage = false;
   });
@@ -179,11 +185,16 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
+    const now = Date.now();
+
     // Only capture TTFT for the first assistant message
     if (!hasSeenAssistantMessage) {
-      currentTiming.firstTokenMs = Date.now();
+      currentTiming.firstTokenMs = now;
       hasSeenAssistantMessage = true;
     }
+
+    // Track when this specific message started (for generation time calculation)
+    currentTiming.currentMessageStartMs = now;
   });
 
   // Track when a message ends
@@ -191,8 +202,20 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    // Update last token time for each assistant message
-    currentTiming.lastTokenMs = Date.now();
+    const now = Date.now();
+
+    // Update last token time for the overall turn
+    currentTiming.lastTokenMs = now;
+
+    // Accumulate active generation time for this message only
+    if (currentTiming.currentMessageStartMs) {
+      const messageGenerationMs = now - currentTiming.currentMessageStartMs;
+      currentTiming.totalGenerationMs += messageGenerationMs;
+      currentTiming.currentMessageStartMs = null;
+    }
+
+    // Store this message to count its tokens later (only current turn's messages)
+    currentTiming.assistantMessages.push(event.message as AssistantMessage);
   });
 
   // Calculate and display stats when agent loop ends
