@@ -489,7 +489,7 @@ describe('pi-tps extension', () => {
     expect(notification).toMatch(/\d+s · out |\d+m \d+s · out/); // Total time
   });
 
-  it('should calculate wall-clock TPS including TTFT and tool gaps', async () => {
+  it('should calculate true generation TPS excluding TTFT and tool gaps', async () => {
     const turnStartEvent: TurnStartEvent = {
       type: 'turn_start',
       turnIndex: 0,
@@ -534,19 +534,19 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
-    // Simulate: wall-clock from turn_start to agent_end (includes TTFT + tool gaps)
+    // Simulate: true generation time excludes gaps
     handlers['turn_start']?.(turnStartEvent);
-    await tick(100); // TTFT
+    await tick(100); // TTFT (excluded from generation TPS)
 
-    // First message: 200ms generation
+    // First message: 200ms pure generation
     handlers['message_start']?.({ type: 'message_start', message: firstMessage });
     await tick(200);
     handlers['message_end']?.({ type: 'message_end', message: firstMessage });
 
-    // TOOL EXECUTION GAP: 1000ms (now INCLUDED in wall-clock TPS)
+    // TOOL EXECUTION GAP: 1000ms (excluded from generation TPS)
     await tick(1000);
 
-    // Second message: 400ms generation
+    // Second message: 400ms pure generation
     handlers['message_start']?.({ type: 'message_start', message: secondMessage });
     await tick(400);
     handlers['message_end']?.({ type: 'message_end', message: secondMessage });
@@ -561,15 +561,15 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
 
-    // Wall-clock TPS: 1000 tokens / ~1.7s (100+200+1000+400ms) = ~588 TPS
-    // This reflects user-perceived speed including TTFT and tool delays
+    // True generation TPS: 1000 tokens / 0.6s (200ms + 400ms) = ~1667 TPS
+    // TTFT and tool gaps are excluded - this is actual LLM inference speed
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
 
-    // Should be ~588 (1000 tokens / 1.7s wall-clock), not ~1666 (raw LLM speed)
-    expect(tps).toBeLessThan(800); // Wall-clock includes gaps, so lower TPS
-    expect(tps).toBeGreaterThan(400); // But not absurdly low
+    // Should be ~1667 (raw LLM speed), not ~588 (wall-clock with gaps)
+    expect(tps).toBeGreaterThan(1000); // True generation is fast
+    expect(tps).toBeLessThan(2000); // But not absurdly high
     expect(notification).toContain('out 1,000'); // 200 + 800 tokens
     expect(notification).toContain('in 600'); // 100 + 500 tokens
   });

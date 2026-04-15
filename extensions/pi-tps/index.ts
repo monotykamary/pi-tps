@@ -38,6 +38,8 @@ interface TurnTiming {
   firstTokenMs: number | null;
   lastTokenMs: number | null;
   assistantMessages: AssistantMessage[]; // Messages generated in THIS turn only
+  totalGenerationMs: number; // Accumulated streaming time (excludes gaps)
+  currentMessageStartMs: number | null; // When the current message started streaming
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -127,11 +129,10 @@ function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null
   const ttftMs = timing.firstTokenMs - timing.turnStartMs;
   const totalMs = timing.lastTokenMs - timing.turnStartMs;
 
-  // Wall-clock time from turn start to completion (includes TTFT + tool gaps)
-  const wallClockMs = timing.lastTokenMs - timing.turnStartMs;
-  if (wallClockMs <= 0) return null;
+  // True generation TPS: only counts actual streaming time (excludes TTFT and tool gaps)
+  if (timing.totalGenerationMs <= 0) return null;
 
-  const generationSeconds = wallClockMs / 1000;
+  const generationSeconds = timing.totalGenerationMs / 1000;
   const tps = output / generationSeconds;
 
   const ttftFormatted = formatDuration(ttftMs / 1000);
@@ -173,6 +174,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
       firstTokenMs: null,
       lastTokenMs: null,
       assistantMessages: [],
+      totalGenerationMs: 0,
+      currentMessageStartMs: null,
     };
     hasSeenAssistantMessage = false;
   });
@@ -182,11 +185,16 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
+    const now = Date.now();
+
     // Only capture TTFT for the first assistant message
     if (!hasSeenAssistantMessage) {
-      currentTiming.firstTokenMs = Date.now();
+      currentTiming.firstTokenMs = now;
       hasSeenAssistantMessage = true;
     }
+
+    // Track when THIS message started streaming (for generation TPS)
+    currentTiming.currentMessageStartMs = now;
   });
 
   // Track when a message ends
@@ -194,8 +202,17 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
+    const now = Date.now();
+
     // Update last token time for the overall turn
-    currentTiming.lastTokenMs = Date.now();
+    currentTiming.lastTokenMs = now;
+
+    // Accumulate ACTUAL streaming time for this message (true generation time)
+    if (currentTiming.currentMessageStartMs) {
+      const messageGenerationMs = now - currentTiming.currentMessageStartMs;
+      currentTiming.totalGenerationMs += messageGenerationMs;
+      currentTiming.currentMessageStartMs = null; // Reset for next message
+    }
 
     // Store this message to count its tokens later (only current turn's messages)
     currentTiming.assistantMessages.push(event.message as AssistantMessage);
