@@ -15,34 +15,34 @@ describe('pi-tps extension', () => {
   let mockUI: Partial<UIAPI>;
   let handlers: Record<string, (...args: unknown[]) => void>;
   let notifySpy: ReturnType<typeof vi.fn>;
-  let setWidgetSpy: ReturnType<typeof vi.fn>;
-  let mockSessionManager: { getSessionId: ReturnType<typeof vi.fn> };
+  let appendEntrySpy: ReturnType<typeof vi.fn>;
+  let mockEntries: Array<{ role: string; customType?: string; content: unknown }>;
   let mockCtx: ExtensionContext;
 
   beforeEach(async () => {
     handlers = {};
     notifySpy = vi.fn();
-    setWidgetSpy = vi.fn();
-    // Use unique session key per test to avoid state leakage
-    const testId = Math.random().toString(36).substring(7);
-    mockSessionManager = { getSessionId: vi.fn().mockReturnValue(`test-session-${testId}`) };
+    appendEntrySpy = vi.fn();
+    mockEntries = [];
 
     mockUI = {
       notify: notifySpy,
-      setWidget: setWidgetSpy,
     };
 
     mockCtx = {
       hasUI: true,
       ui: mockUI as UIAPI,
-      sessionManager: mockSessionManager as unknown as ExtensionContext['sessionManager'],
-    } as ExtensionContext;
+      sessionManager: {
+        getEntries: vi.fn().mockReturnValue(mockEntries),
+      },
+    } as unknown as ExtensionContext;
 
     mockPi = {
       on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
         handlers[event] = handler;
         return mockPi as ExtensionAPI;
       }),
+      appendEntry: appendEntrySpy,
     };
 
     // Import fresh to trigger module load
@@ -55,12 +55,12 @@ describe('pi-tps extension', () => {
   });
 
   it('should register agent_start, agent_end, and session_start handlers', () => {
+    expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('agent_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('agent_end', expect.any(Function));
-    expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
   });
 
-  it('should calculate TPS correctly for single assistant message', async () => {
+  it('should show notification and save entry after agent_end', async () => {
     const mockMessage: AssistantMessage = {
       role: 'assistant',
       content: 'Hello world',
@@ -77,7 +77,7 @@ describe('pi-tps extension', () => {
       messages: [mockMessage],
     };
 
-    handlers['agent_start']?.({}, mockCtx);
+    handlers['agent_start']?.();
     await tick();
     handlers['agent_end']?.(mockEvent, mockCtx);
 
@@ -88,46 +88,56 @@ describe('pi-tps extension', () => {
     expect(notification).toContain('out 200');
     expect(notification).toContain('in 100');
 
-    // Widget should be set
-    expect(setWidgetSpy).toHaveBeenCalledWith('tps', expect.any(Function));
+    expect(appendEntrySpy).toHaveBeenCalledOnce();
+    const [type, data] = appendEntrySpy.mock.calls[0];
+    expect(type).toBe('tps');
+    expect(data.message).toContain('TPS');
+    expect(data.timestamp).toBeTypeOf('number');
   });
 
-  it('should persist widget on session resume if stats exist', async () => {
-    // First, generate some stats
-    const mockMessage: AssistantMessage = {
-      role: 'assistant',
-      content: 'Hello world',
-      usage: {
-        input: 100,
-        output: 200,
-        cacheRead: 50,
-        cacheWrite: 25,
-        totalTokens: 375,
-      },
-    };
+  it('should restore notification on session resume if entry exists', () => {
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: { message: 'TPS 42.0 tok/s. out 100', timestamp: Date.now() },
+    });
 
-    const mockEvent: AgentEndEvent = {
-      messages: [mockMessage],
-    };
-
-    handlers['agent_start']?.({}, mockCtx);
-    await tick();
-    handlers['agent_end']?.(mockEvent, mockCtx);
-
-    expect(setWidgetSpy).toHaveBeenCalledWith('tps', expect.any(Function));
-
-    // Clear and simulate session resume (reason: 'switch' should restore widget)
-    setWidgetSpy.mockClear();
     handlers['session_start']?.({ reason: 'switch' }, mockCtx);
 
-    // Widget should be restored
-    expect(setWidgetSpy).toHaveBeenCalledWith('tps', expect.any(Function));
+    expect(notifySpy).toHaveBeenCalledOnce();
+    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s. out 100', 'info');
   });
 
-  it('should not restore widget on session start for new sessions', async () => {
-    // Simulate session start for new session (reason: 'startup')
+  it('should not restore notification on session start for new sessions', () => {
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: { message: 'TPS 42.0 tok/s', timestamp: Date.now() },
+    });
+
     handlers['session_start']?.({ reason: 'startup' }, mockCtx);
-    expect(setWidgetSpy).not.toHaveBeenCalled();
+
+    expect(notifySpy).not.toHaveBeenCalled();
+  });
+
+  it('should restore the most recent TPS entry on resume', () => {
+    mockEntries.push(
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: { message: 'TPS 10.0 tok/s old', timestamp: Date.now() - 1000 },
+      },
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: { message: 'TPS 50.0 tok/s recent', timestamp: Date.now() },
+      }
+    );
+
+    handlers['session_start']?.({ reason: 'resume' }, mockCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    expect(notifySpy).toHaveBeenCalledWith('TPS 50.0 tok/s recent', 'info');
   });
 
   it('should aggregate tokens from multiple assistant messages', async () => {
@@ -160,7 +170,7 @@ describe('pi-tps extension', () => {
       messages: mockMessages,
     };
 
-    handlers['agent_start']?.({}, mockCtx);
+    handlers['agent_start']?.();
     await tick();
     handlers['agent_end']?.(mockEvent, mockCtx);
 
@@ -170,22 +180,23 @@ describe('pi-tps extension', () => {
     expect(notification).toContain('in 80'); // 50 + 30
   });
 
-  it('should skip notification and widget when hasUI is false', async () => {
+  it('should skip notification when hasUI is false', async () => {
+    const noUiCtx = { ...mockCtx, hasUI: false };
     const mockEvent: AgentEndEvent = {
-      messages: [],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Hello',
+          usage: { input: 10, output: 20, totalTokens: 30 },
+        } as AssistantMessage,
+      ],
     };
 
-    const noUiCtx = {
-      ...mockCtx,
-      hasUI: false,
-    };
-
-    handlers['agent_start']?.({}, noUiCtx);
+    handlers['agent_start']?.();
     await tick();
     handlers['agent_end']?.(mockEvent, noUiCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
-    expect(setWidgetSpy).not.toHaveBeenCalled();
   });
 
   it('should skip notification when no output tokens', async () => {
@@ -205,12 +216,12 @@ describe('pi-tps extension', () => {
       messages: [mockMessage],
     };
 
-    handlers['agent_start']?.({}, mockCtx);
+    handlers['agent_start']?.();
     await tick();
     handlers['agent_end']?.(mockEvent, mockCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
-    expect(setWidgetSpy).not.toHaveBeenCalled();
+    expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
   it('should ignore non-assistant messages', async () => {
@@ -221,16 +232,29 @@ describe('pi-tps extension', () => {
       ],
     };
 
-    handlers['agent_start']?.({}, mockCtx);
+    handlers['agent_start']?.();
     await tick();
     handlers['agent_end']?.(mockEvent, mockCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
-    expect(setWidgetSpy).not.toHaveBeenCalled();
+    expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
-  it('should not restore widget on session resume if no stats', () => {
-    handlers['session_start']?.({ reason: 'switch' }, mockCtx);
-    expect(setWidgetSpy).not.toHaveBeenCalled();
+  it('should skip notification when agent_start was not called', () => {
+    const mockEvent: AgentEndEvent = {
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Hello',
+          usage: { input: 10, output: 20, totalTokens: 30 },
+        } as AssistantMessage,
+      ],
+    };
+
+    // Don't call agent_start, just agent_end
+    handlers['agent_end']?.(mockEvent, mockCtx);
+
+    expect(notifySpy).not.toHaveBeenCalled();
+    expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 });

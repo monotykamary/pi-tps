@@ -8,7 +8,7 @@ See your LLM generation speed (tokens/second) after every agent turn.
 
 ---
 
-_Originally from [badlogic/pi-mono](https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts). Packaged as an installable extension with persistent widget support._
+_Originally from [badlogic/pi-mono](https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts). Packaged as an installable pi extension._
 
 ---
 
@@ -29,8 +29,8 @@ pi install https://github.com/monotykamary/pi-tps
 - **Automatic timing**: Measures wall-clock time from `agent_start` to `agent_end`
 - **Token aggregation**: Sums up all assistant message tokens (input, output, cache read/write)
 - **TPS calculation**: Computes `output_tokens / elapsed_seconds`
-- **UI notification**: Displays formatted stats via `ctx.ui.notify()`
-- **Persistent widget**: Stats survive session resumes via `ctx.ui.setWidget()`
+- **Notification banner**: Shows stats in a transient popup notification
+- **Persisted notifications**: Notifications are restored on session resume
 
 ## Install
 
@@ -56,8 +56,8 @@ Then `/reload` in pi.
 The extension hooks into pi's lifecycle events:
 
 1. **`agent_start`**: Captures the start timestamp
-2. **`agent_end`**: Calculates elapsed time, aggregates token usage from all assistant messages, computes TPS, displays notification, and sets a persistent widget
-3. **`session_start`**: Restores the widget when resuming/forking sessions (if stats were previously cached)
+2. **`agent_end`**: Calculates elapsed time, aggregates token usage from all assistant messages, computes TPS, shows a notification, and saves the data for restoration
+3. **`session_start`**: When resuming/forking/switching to an existing session, restores the most recent TPS notification
 
 ### Output format
 
@@ -74,6 +74,8 @@ TPS 42.5 tok/s. out 1,234, in 567, cache r/w 890/123, total 2,814, 29.0s
 | `cache w` | Cache write tokens                   |
 | `total`   | Total tokens (input + output)        |
 | `s`       | Elapsed time in seconds              |
+
+The stats are saved as a custom entry (type `tps`) which persists in the session and is restored as a notification when you resume the session.
 
 ---
 

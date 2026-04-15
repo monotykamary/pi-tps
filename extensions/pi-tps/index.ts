@@ -1,14 +1,19 @@
 /**
  * pi-tps — Tokens-per-second tracker for pi
  *
- * Tracks LLM generation speed (tokens/second) after every agent turn
- * and displays a persistent widget with detailed token usage stats.
+ * Tracks LLM generation speed (tokens/second) after every agent turn,
+ * shows a notification, and restores it on session resume.
+ *
+ * Originally from: https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts
  */
 
 import type { AssistantMessage } from '@mariozechner/pi-ai';
 import type { ExtensionAPI, AgentEndEvent, ExtensionContext } from '@mariozechner/pi-coding-agent';
-import { Text, truncateToWidth } from '@mariozechner/pi-tui';
-import type { TUI } from '@mariozechner/pi-tui';
+
+interface TPSData {
+  message: string;
+  timestamp: number;
+}
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
   if (!message || typeof message !== 'object') return false;
@@ -16,20 +21,7 @@ function isAssistantMessage(message: unknown): message is AssistantMessage {
   return role === 'assistant';
 }
 
-interface TPSStats {
-  tps: number;
-  output: number;
-  input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  totalTokens: number;
-  elapsedSeconds: number;
-  timestamp: number;
-}
-
-const statsStore = new Map<string, TPSStats>();
-
-function calculateStats(event: AgentEndEvent, startMs: number): TPSStats | null {
+function calculateStats(event: AgentEndEvent, startMs: number): string | null {
   const elapsedMs = Date.now() - startMs;
   if (elapsedMs <= 0) return null;
 
@@ -53,81 +45,50 @@ function calculateStats(event: AgentEndEvent, startMs: number): TPSStats | null 
   const elapsedSeconds = elapsedMs / 1000;
   const tps = output / elapsedSeconds;
 
-  return {
-    tps,
-    output,
-    input,
-    cacheRead,
-    cacheWrite,
-    totalTokens,
-    elapsedSeconds,
-    timestamp: Date.now(),
-  };
-}
-
-function createWidgetRenderer(stats: TPSStats): (tui: TUI, theme: unknown) => Text {
-  return (_tui: TUI, _theme: unknown) => {
-    const width = process.stdout.columns || 120;
-
-    const parts = [
-      `TPS ${stats.tps.toFixed(1)} tok/s`,
-      `out ${stats.output.toLocaleString()}`,
-      `in ${stats.input.toLocaleString()}`,
-      `cache r/w ${stats.cacheRead.toLocaleString()}/${stats.cacheWrite.toLocaleString()}`,
-      `total ${stats.totalTokens.toLocaleString()}`,
-      `${stats.elapsedSeconds.toFixed(1)}s`,
-    ];
-
-    const content = parts.join(' │ ');
-    return new Text(truncateToWidth(content, width), 0, 0);
-  };
-}
-
-function getSessionKey(ctx: ExtensionContext): string {
-  return ctx.sessionManager.getSessionId();
+  return `TPS ${tps.toFixed(1)} tok/s. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSeconds.toFixed(1)}s`;
 }
 
 export default function tpsExtension(pi: ExtensionAPI) {
-  const startTimes = new Map<string, number>();
+  let agentStartMs: number | null = null;
 
-  // Restore widget on session start/resume if we have cached stats
+  // Restore notification on session resume if we have saved stats
   pi.on('session_start', (event, ctx) => {
     if (!ctx.hasUI) return;
     // Only restore for existing sessions (resume, fork, switch), not new ones
     if (event.reason === 'startup' || event.reason === 'reload') return;
 
-    const key = getSessionKey(ctx);
-    const stats = statsStore.get(key);
-    if (stats) {
-      ctx.ui.setWidget('tps', createWidgetRenderer(stats));
+    const entries = ctx.sessionManager.getEntries();
+    // Find the most recent TPS entry
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.type === 'custom' && entry.customType === 'tps') {
+        const data = entry.data as TPSData;
+        if (data?.message) {
+          ctx.ui.notify(data.message, 'info');
+        }
+        break;
+      }
     }
   });
 
-  pi.on('agent_start', (_event, ctx) => {
-    const key = getSessionKey(ctx);
-    startTimes.set(key, Date.now());
+  pi.on('agent_start', () => {
+    agentStartMs = Date.now();
   });
 
   pi.on('agent_end', (event, ctx) => {
     if (!ctx.hasUI) return;
+    if (agentStartMs === null) return;
 
-    const key = getSessionKey(ctx);
-    const startMs = startTimes.get(key);
-    startTimes.delete(key);
+    const startMs = agentStartMs;
+    agentStartMs = null;
 
-    if (startMs === undefined) return;
+    const message = calculateStats(event, startMs);
+    if (!message) return;
 
-    const stats = calculateStats(event, startMs);
-    if (!stats) return;
-
-    // Persist stats for session resume
-    statsStore.set(key, stats);
-
-    // Also show transient notification
-    const message = `TPS ${stats.tps.toFixed(1)} tok/s. out ${stats.output.toLocaleString()}, in ${stats.input.toLocaleString()}, cache r/w ${stats.cacheRead.toLocaleString()}/${stats.cacheWrite.toLocaleString()}, total ${stats.totalTokens.toLocaleString()}, ${stats.elapsedSeconds.toFixed(1)}s`;
+    // Show notification immediately
     ctx.ui.notify(message, 'info');
 
-    // Set persistent widget that survives across turns
-    ctx.ui.setWidget('tps', createWidgetRenderer(stats));
+    // Save to session for restoration on resume
+    pi.appendEntry('tps', { message, timestamp: Date.now() });
   });
 }
