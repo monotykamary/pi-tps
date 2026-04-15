@@ -8,7 +8,7 @@
  * Originally from: https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts
  */
 
-import type { AssistantMessage, Message } from '@mariozechner/pi-ai';
+import type { AssistantMessage } from '@mariozechner/pi-ai';
 import type { ExtensionAPI, AgentEndEvent, ExtensionContext } from '@mariozechner/pi-coding-agent';
 
 // Event types not exported from main package - define locally
@@ -37,8 +37,6 @@ interface TurnTiming {
   turnStartMs: number;
   firstTokenMs: number | null;
   lastTokenMs: number | null;
-  totalGenerationMs: number; // Accumulated active generation time only
-  currentMessageStartMs: number | null; // Track when current message started
   assistantMessages: AssistantMessage[]; // Messages generated in THIS turn only
 }
 
@@ -174,8 +172,6 @@ export default function tpsExtension(pi: ExtensionAPI) {
       turnStartMs: event.timestamp,
       firstTokenMs: null,
       lastTokenMs: null,
-      totalGenerationMs: 0,
-      currentMessageStartMs: null,
       assistantMessages: [],
     };
     hasSeenAssistantMessage = false;
@@ -186,16 +182,11 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    const now = Date.now();
-
     // Only capture TTFT for the first assistant message
     if (!hasSeenAssistantMessage) {
-      currentTiming.firstTokenMs = now;
+      currentTiming.firstTokenMs = Date.now();
       hasSeenAssistantMessage = true;
     }
-
-    // Track when this specific message started (for generation time calculation)
-    currentTiming.currentMessageStartMs = now;
   });
 
   // Track when a message ends
@@ -203,17 +194,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    const now = Date.now();
-
     // Update last token time for the overall turn
-    currentTiming.lastTokenMs = now;
-
-    // Accumulate active generation time for this message only
-    if (currentTiming.currentMessageStartMs) {
-      const messageGenerationMs = now - currentTiming.currentMessageStartMs;
-      currentTiming.totalGenerationMs += messageGenerationMs;
-      currentTiming.currentMessageStartMs = null;
-    }
+    currentTiming.lastTokenMs = Date.now();
 
     // Store this message to count its tokens later (only current turn's messages)
     currentTiming.assistantMessages.push(event.message as AssistantMessage);
