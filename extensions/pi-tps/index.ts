@@ -49,6 +49,60 @@ function formatNumber(num: number): string {
   return num.toLocaleString();
 }
 
+/**
+ * Format duration in seconds to human-readable string.
+ * Rules: no decimals, up to 2 units, includes weeks.
+ * Exported for testing.
+ */
+export function formatDuration(totalSeconds: number): string {
+  if (totalSeconds < 60) {
+    return `${Math.round(totalSeconds)}s`;
+  }
+
+  const seconds = Math.round(totalSeconds);
+  const units = [
+    { label: 'mo', seconds: 30 * 24 * 60 * 60 }, // 30 days
+    { label: 'w', seconds: 7 * 24 * 60 * 60 },
+    { label: 'd', seconds: 24 * 60 * 60 },
+    { label: 'h', seconds: 60 * 60 },
+    { label: 'm', seconds: 60 },
+    { label: 's', seconds: 1 },
+  ];
+
+  const parts: { value: number; label: string }[] = [];
+  let remaining = seconds;
+
+  // First pass: extract all units with non-zero values
+  for (let i = 0; i < units.length; i++) {
+    const unit = units[i];
+    if (remaining >= unit.seconds) {
+      const value = Math.floor(remaining / unit.seconds);
+      parts.push({ value, label: unit.label });
+      remaining %= unit.seconds;
+    }
+  }
+
+  // If we only found one unit, add the next smaller unit as zero
+  // Skip 'w' (weeks) when the primary unit is 'mo' (months) for better readability
+  if (parts.length === 1) {
+    const firstUnitIndex = units.findIndex((u) => u.label === parts[0].label);
+    if (firstUnitIndex < units.length - 1) {
+      let nextIndex = firstUnitIndex + 1;
+      // Skip weeks when showing months - go directly to days
+      if (parts[0].label === 'mo' && units[nextIndex].label === 'w') {
+        nextIndex++;
+      }
+      if (nextIndex < units.length) {
+        parts.push({ value: 0, label: units[nextIndex].label });
+      }
+    }
+  }
+
+  // Return up to 2 most significant units
+  const top2 = parts.slice(0, 2);
+  return top2.map((p) => `${p.value}${p.label}`).join(' ');
+}
+
 function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null {
   // Aggregate token usage from all assistant messages
   let input = 0;
@@ -77,10 +131,11 @@ function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null
 
   const generationSeconds = generationMs / 1000;
   const tps = output / generationSeconds;
-  const ttftSeconds = ttftMs / 1000;
-  const totalSeconds = totalMs / 1000;
 
-  return `TPS ${tps.toFixed(1)} tok/s · TTFT ${ttftSeconds.toFixed(1)}s · ${totalSeconds.toFixed(1)}s · out ${formatNumber(output)} · in ${formatNumber(input)}`;
+  const ttftFormatted = formatDuration(ttftMs / 1000);
+  const totalFormatted = formatDuration(totalMs / 1000);
+
+  return `TPS ${tps.toFixed(1)} tok/s · TTFT ${ttftFormatted} · ${totalFormatted} · out ${formatNumber(output)} · in ${formatNumber(input)}`;
 }
 
 export default function tpsExtension(pi: ExtensionAPI) {
