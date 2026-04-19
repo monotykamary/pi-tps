@@ -12,7 +12,7 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint:dead": "knip --no-gitignore",
-    "postinstall": "simple-git-hooks"
+    "postinstall": "simple-git-hooks 2>/dev/null || true"
   },
   "pi": {
     "extensions": [
