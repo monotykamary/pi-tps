@@ -296,38 +296,43 @@ export default function tpsExtension(pi: ExtensionAPI) {
     };
   });
 
-  // Track when a message starts (first token received)
+  // Track when a message starts. In pi, message_start fires at stream
+  // creation (before any tokens), so we defer TTFT to the first
+  // message_update which carries the first real token.
   pi.on('message_start', (event: MessageStartEvent) => {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
     const now = Date.now();
 
-    // Only capture TTFT for the first assistant message
-    if (currentTiming.firstTokenMs === null) {
-      currentTiming.firstTokenMs = now;
-    }
-
     // Track when THIS message started streaming (for generation TPS)
     currentTiming.currentMessageStartMs = now;
-
-    // Update last update time for stall tracking
-    currentTiming.lastUpdateMs = now;
     currentTiming.messageCount++;
 
-    // End any active stall (a message starting means we're not stalled)
+    // Reset stall-tracking clock so tool-execution gaps between
+    // messages don't get counted as inference stalls.
+    currentTiming.lastUpdateMs = now;
     currentTiming.inStall = false;
   });
 
-  // Track token-by-token updates during streaming (real-time TPS & stall detection)
+  // Track token-by-token updates during streaming (real-time TPS & stall detection).
+  // The first message_update is the effective first token (message_start fires
+  // at stream creation, before any content arrives).
   pi.on('message_update', (event: MessageUpdateEvent) => {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    // Only track stalls after first token has arrived (TTFT is not a stall)
-    if (currentTiming.firstTokenMs === null) return;
-
     const now = Date.now();
+
+    // First token: capture TTFT and seed stall timing, then bail.
+    // No stall detection on this event — the gap from message_start to
+    // first message_update is provider parsing overhead, not a stall.
+    if (currentTiming.firstTokenMs === null) {
+      currentTiming.firstTokenMs = now;
+      currentTiming.lastUpdateMs = now;
+      return;
+    }
+
     const gap = now - currentTiming.lastUpdateMs;
 
     // Detect stall: gap exceeds debounce threshold. Only the excess
