@@ -337,7 +337,7 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
   });
 
-  it('should restore the most recent TPS entry on resume', async () => {
+  it('should restore all TPS entries on resume (not just the most recent)', async () => {
     mockEntries.push(
       {
         type: 'custom',
@@ -380,10 +380,13 @@ describe('pi-tps extension', () => {
     handlers['session_start']?.({ reason: 'resume' }, mockCtx);
     await tick(); // deferred via setTimeout(0)
 
-    expect(notifySpy).toHaveBeenCalledOnce();
-    const msg = notifySpy.mock.calls[0][0];
-    expect(msg).toContain('TPS 83.3');
-    expect(msg).toContain('stall'); // has stall info
+    // Both entries should be shown (recent first since iteration is backwards)
+    expect(notifySpy).toHaveBeenCalledTimes(2);
+    const firstMsg = notifySpy.mock.calls[0][0];
+    const secondMsg = notifySpy.mock.calls[1][0];
+    expect(firstMsg).toContain('TPS 83.3');
+    expect(firstMsg).toContain('stall');
+    expect(secondMsg).toContain('TPS 1.2');
   });
 
   // ── Token aggregation across multiple messages per turn ──────────────────
