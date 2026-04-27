@@ -857,7 +857,8 @@ describe('pi-tps extension', () => {
     // Verify structured data
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.timing.stallCount).toBe(2);
-    expect(data.timing.stallMs).toBeGreaterThanOrEqual(1300); // 800 + 600 - some threshold margin
+    // (800-500) + (600-500) = 400, minus real-timer jitter margin
+    expect(data.timing.stallMs).toBeGreaterThanOrEqual(350);
   });
 
   it('should not flag short gaps as stalls', async () => {

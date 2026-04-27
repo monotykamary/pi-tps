@@ -324,16 +324,20 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
+    // Only track stalls after first token has arrived (TTFT is not a stall)
+    if (currentTiming.firstTokenMs === null) return;
+
     const now = Date.now();
     const gap = now - currentTiming.lastUpdateMs;
 
-    // Detect stall: gap between consecutive updates exceeds threshold
+    // Detect stall: gap exceeds debounce threshold. Only the excess
+    // beyond the threshold counts as stall time (threshold is "normal" jitter).
     if (gap >= STALL_THRESHOLD_MS) {
       if (!currentTiming.inStall) {
         currentTiming.stallCount++;
       }
       currentTiming.inStall = true;
-      currentTiming.stallMs += gap;
+      currentTiming.stallMs += gap - STALL_THRESHOLD_MS;
     } else {
       currentTiming.inStall = false;
     }
