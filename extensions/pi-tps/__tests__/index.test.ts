@@ -1029,7 +1029,7 @@ describe('pi-tps extension', () => {
     // Should export 2 custom entries from branch (1 tps + 1 neuralwatt-energy)
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('Exported 2 entries');
+    expect(msg).toContain('Exported 2 telemetry');
     expect(msg).toContain('pi-telemetry-branch-');
     expect(msg).toContain('/pi-telemetry/');
   });
@@ -1048,7 +1048,7 @@ describe('pi-tps extension', () => {
     // Should export 3 custom entries (2 tps + 1 neuralwatt-energy)
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('Exported 3 entries');
+    expect(msg).toContain('Exported 3 telemetry');
     expect(msg).toContain('pi-telemetry-full-');
   });
 
@@ -1065,7 +1065,7 @@ describe('pi-tps extension', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('Exported 2 entries');
+    expect(msg).toContain('Exported 2 telemetry');
     expect(msg).toContain('pi-telemetry-full-tps-');
   });
 
@@ -1082,7 +1082,7 @@ describe('pi-tps extension', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('Exported 1 entry');
+    expect(msg).toContain('Exported 1 telemetry');
     expect(msg).toContain('pi-telemetry-branch-tps-');
   });
 
@@ -1135,8 +1135,137 @@ describe('pi-tps extension', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('Exported 1 entry');
+    expect(msg).toContain('Exported 1 telemetry');
     expect(msg).toContain('pi-telemetry-branch-neuralwatt-energy-');
+  });
+
+  it('should include model_change entries and re-chain parentIds', async () => {
+    const entriesWithModelChange = [
+      {
+        type: 'model_change',
+        id: 'mc1',
+        parentId: null,
+        timestamp: '2026-01-01T00:00:00Z',
+        provider: 'test',
+        modelId: 'test-model',
+      },
+      {
+        type: 'message',
+        id: 'msg1',
+        parentId: 'mc1',
+        timestamp: '2026-01-01T00:00:01Z',
+        role: 'user',
+        content: 'hello',
+      },
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: { tps: 10 },
+        id: 'tps1',
+        parentId: 'msg1',
+        timestamp: '2026-01-01T00:00:02Z',
+      },
+      {
+        type: 'message',
+        id: 'msg2',
+        parentId: 'tps1',
+        timestamp: '2026-01-01T00:00:03Z',
+        role: 'assistant',
+        content: 'hi',
+      },
+      {
+        type: 'model_change',
+        id: 'mc2',
+        parentId: 'msg2',
+        timestamp: '2026-01-01T00:00:04Z',
+        provider: 'other',
+        modelId: 'other-model',
+      },
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: { tps: 20 },
+        id: 'tps2',
+        parentId: 'mc2',
+        timestamp: '2026-01-01T00:00:05Z',
+      },
+    ];
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue(entriesWithModelChange),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as ExtensionCommandContext;
+
+    await commands['tps-export'].handler('', exportCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    // 2 tps + 2 model_change = 2 telemetry + 2 structural
+    expect(msg).toContain('2 telemetry + 2 structural');
+
+    // Verify file content: parentIds should be re-chained within exported entries
+    const filepath = msg.split('→ ')[1];
+    const fs = await import('fs');
+    const content = fs.readFileSync(filepath, 'utf8');
+    const lines = content
+      .trim()
+      .split('\n')
+      .map((l: string) => JSON.parse(l));
+
+    // model_change mc1: root → parentId should be null
+    expect(lines.find((l: any) => l.id === 'mc1').parentId).toBeNull();
+    // tps1: original parentId was msg1 (message), re-chained to mc1 (model_change)
+    expect(lines.find((l: any) => l.id === 'tps1').parentId).toBe('mc1');
+    // model_change mc2: original parentId was msg2 (message), re-chained to tps1
+    expect(lines.find((l: any) => l.id === 'mc2').parentId).toBe('tps1');
+    // tps2: original parentId was mc2, already in export → stays
+    expect(lines.find((l: any) => l.id === 'tps2').parentId).toBe('mc2');
+  });
+
+  it('should include structural entries even with customType filter', async () => {
+    const entriesWithModelChange = [
+      {
+        type: 'model_change',
+        id: 'mc1',
+        parentId: null,
+        timestamp: '2026-01-01T00:00:00Z',
+        provider: 'test',
+        modelId: 'test-model',
+      },
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: { tps: 10 },
+        id: 'tps1',
+        parentId: 'mc1',
+        timestamp: '2026-01-01T00:00:01Z',
+      },
+      {
+        type: 'custom',
+        customType: 'neuralwatt-energy',
+        data: { energy_joules: 100 },
+        id: 'ne1',
+        parentId: 'tps1',
+        timestamp: '2026-01-01T00:00:02Z',
+      },
+    ];
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue(entriesWithModelChange),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as ExtensionCommandContext;
+
+    // Filter by 'tps' — should still include model_change structural entries
+    await commands['tps-export'].handler('tps', exportCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    // 1 tps (filtered) + 1 model_change (structural, always included)
+    expect(msg).toContain('1 telemetry + 1 structural');
   });
 });
 

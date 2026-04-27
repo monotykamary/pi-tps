@@ -395,7 +395,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   pi.registerCommand('tps-export', {
     description:
-      'Export telemetry from the current session branch as JSONL (--full for all branches)',
+      'Export telemetry + session structure (model changes, branch points) as JSONL (--full for all branches, filter by customType)',
     getArgumentCompletions: (argumentPrefix: string) => {
       // Offer --full flag
       if ('--full'.startsWith(argumentPrefix)) {
@@ -418,17 +418,46 @@ export default function tpsExtension(pi: ExtensionAPI) {
       const full = tokens.includes('--full');
       const filterType = tokens.filter((t) => t !== '--full').join(' ') || null;
 
-      // Collect all custom entries, optionally filtered by customType
+      // Collect entries: custom entries (+ optional customType filter) + structural entries
+      // Structural entries (model_change, branch_summary) are always included so the
+      // exported parentId tree is fully resolvable and the web inspector can show
+      // model switches and branch points.
       const entries = full ? ctx.sessionManager.getEntries() : ctx.sessionManager.getBranch();
-      const customEntries = entries.filter(
-        (e) => e.type === 'custom' && (!filterType || e.customType === filterType)
+      const isStructural = (e: { type: string }) =>
+        e.type === 'model_change' || e.type === 'branch_summary';
+
+      const exportedEntries = entries.filter(
+        (e) =>
+          isStructural(e) || (e.type === 'custom' && (!filterType || e.customType === filterType))
       );
 
-      if (customEntries.length === 0) {
+      if (exportedEntries.length === 0) {
         const scope = full ? 'all-entries' : 'current-branch';
         ctx.ui.notify(`No matching entries found in ${scope}`, 'warning');
         return;
       }
+
+      // Re-chain parentIds so the exported entries form a valid tree.
+      // Original parentIds often point to message entries (not in the export).
+      // We walk up the full session tree until we find the nearest ancestor
+      // that IS in the export, giving us a self-contained tree structure.
+      const byId = new Map<string, (typeof entries)[number]>(entries.map((e) => [e.id, e]));
+      const exportedIds = new Set(exportedEntries.map((e) => e.id));
+
+      const rechainParentId = (entry: (typeof exportedEntries)[number]): string | null => {
+        let current: string | null = entry.parentId;
+        while (current) {
+          if (exportedIds.has(current)) return current;
+          const parent = byId.get(current);
+          current = parent?.parentId ?? null;
+        }
+        return null;
+      };
+
+      const rechained = exportedEntries.map((e) => ({
+        ...e,
+        parentId: rechainParentId(e),
+      }));
 
       // Write to tmp directory
       const dir = join(tmpdir(), 'pi-telemetry');
@@ -441,11 +470,16 @@ export default function tpsExtension(pi: ExtensionAPI) {
       const filename = `pi-telemetry-${scope}-${sessionId.slice(0, 8)}-${timestamp}.jsonl`;
       const filepath = join(dir, filename);
 
-      const content = customEntries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+      const content = rechained.map((e) => JSON.stringify(e)).join('\n') + '\n';
       writeFileSync(filepath, content);
 
-      const entryWord = customEntries.length === 1 ? 'entry' : 'entries';
-      ctx.ui.notify(`Exported ${customEntries.length} ${entryWord} → ${filepath}`, 'info');
+      const structuralCount = exportedEntries.filter((e) => isStructural(e)).length;
+      const customCount = exportedEntries.length - structuralCount;
+      const parts: string[] = [];
+      if (customCount > 0) parts.push(`${customCount} telemetry`);
+      if (structuralCount > 0) parts.push(`${structuralCount} structural`);
+      const summary = parts.length > 0 ? parts.join(' + ') : `${exportedEntries.length} entries`;
+      ctx.ui.notify(`Exported ${summary} → ${filepath}`, 'info');
     },
   });
 }
