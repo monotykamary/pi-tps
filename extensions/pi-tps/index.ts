@@ -393,8 +393,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // ── Export command ──────────────────────────────────────────────────────
 
   pi.registerCommand('tps-export', {
-    description: 'Export telemetry from the current session as JSONL',
+    description:
+      'Export telemetry from the current session branch as JSONL (--full for all branches)',
     getArgumentCompletions: (argumentPrefix: string) => {
+      // Offer --full flag
+      if ('--full'.startsWith(argumentPrefix)) {
+        return [{ value: '--full', label: '--full (all branches, not just current)' }];
+      }
       // Collect all unique customType values from cached session entries
       const customTypes = new Set<string>();
       for (const entry of cachedEntries) {
@@ -407,17 +412,19 @@ export default function tpsExtension(pi: ExtensionAPI) {
         .map((ct) => ({ value: ct, label: ct }));
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const filterType = args.trim() || null;
+      // Default: current branch. --full: entire session.
+      const full = args.includes('--full');
+      const filterType = args.replace('--full', '').trim() || null;
 
       // Collect all custom entries, optionally filtered by customType
-      const entries = ctx.sessionManager.getEntries();
+      const entries = full ? ctx.sessionManager.getEntries() : ctx.sessionManager.getBranch();
       const customEntries = entries.filter(
         (e) => e.type === 'custom' && (!filterType || e.customType === filterType)
       );
 
       if (customEntries.length === 0) {
-        const scope = filterType ? `customType:"${filterType}"` : 'any custom type';
-        ctx.ui.notify(`No entries found for ${scope}`, 'warning');
+        const scope = full ? 'all-entries' : 'current-branch';
+        ctx.ui.notify(`No matching entries found in ${scope}`, 'warning');
         return;
       }
 
@@ -427,7 +434,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
       const sessionId = ctx.sessionManager.getSessionId?.() ?? 'unknown';
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const scope = filterType ?? 'all';
+      const scopeParts = [full ? 'full' : 'branch', filterType].filter(Boolean);
+      const scope = scopeParts.join('-');
       const filename = `pi-telemetry-${scope}-${sessionId.slice(0, 8)}-${timestamp}.jsonl`;
       const filepath = join(dir, filename);
 

@@ -971,82 +971,97 @@ describe('pi-tps extension', () => {
 
   // ── Export command ──────────────────────────────────────────────────────
 
-  it('should export all custom entries when no filter is given', async () => {
+  const branchEntries = [
+    {
+      type: 'custom',
+      customType: 'tps',
+      data: { tps: 10 },
+      id: '1',
+      parentId: null,
+      timestamp: '2026-01-01T00:00:00Z',
+    },
+    {
+      type: 'custom',
+      customType: 'neuralwatt-energy',
+      data: { energy_joules: 100 },
+      id: '2',
+      parentId: null,
+      timestamp: '2026-01-01T00:00:01Z',
+    },
+    { type: 'message', role: 'user', content: 'hello' },
+  ];
+
+  const allEntries = [
+    ...branchEntries,
+    {
+      type: 'custom',
+      customType: 'tps',
+      data: { tps: 20 },
+      id: '3',
+      parentId: null,
+      timestamp: '2026-01-01T00:00:02Z',
+    },
+  ];
+
+  it('should export current branch custom entries by default', async () => {
     const exportCtx = {
       ...mockCtx,
       sessionManager: {
-        getEntries: vi.fn().mockReturnValue([
-          {
-            type: 'custom',
-            customType: 'tps',
-            data: { tps: 10 },
-            id: '1',
-            parentId: null,
-            timestamp: '2026-01-01T00:00:00Z',
-          },
-          {
-            type: 'custom',
-            customType: 'neuralwatt-energy',
-            data: { energy_joules: 100 },
-            id: '2',
-            parentId: null,
-            timestamp: '2026-01-01T00:00:01Z',
-          },
-          { type: 'message', role: 'user', content: 'hello' },
-          { type: 'session', version: 3, id: 's1', timestamp: '2026-01-01T00:00:00Z', cwd: '/tmp' },
-          {
-            type: 'custom',
-            customType: 'tps',
-            data: { tps: 20 },
-            id: '3',
-            parentId: null,
-            timestamp: '2026-01-01T00:00:02Z',
-          },
-        ]),
+        getBranch: vi.fn().mockReturnValue(branchEntries),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
     } as any;
 
     await commands['tps-export'].handler('', exportCtx);
 
+    // Should export 2 custom entries from branch (1 tps + 1 neuralwatt-energy)
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('Exported 2 entries');
+    expect(msg).toContain('pi-telemetry-branch-');
+    expect(msg).toContain('/pi-telemetry/');
+  });
+
+  it('should export full session with --full flag', async () => {
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getEntries: vi.fn().mockReturnValue(allEntries),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as any;
+
+    await commands['tps-export'].handler('--full', exportCtx);
+
     // Should export 3 custom entries (2 tps + 1 neuralwatt-energy)
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
     expect(msg).toContain('Exported 3 entries');
-    expect(msg).toContain('pi-telemetry-all-');
-    expect(msg).toContain('/pi-telemetry/');
+    expect(msg).toContain('pi-telemetry-full-');
   });
 
-  it('should filter by customType when argument is provided', async () => {
+  it('should combine --full with customType filter', async () => {
     const exportCtx = {
       ...mockCtx,
       sessionManager: {
-        getEntries: vi.fn().mockReturnValue([
-          {
-            type: 'custom',
-            customType: 'tps',
-            data: { tps: 10 },
-            id: '1',
-            parentId: null,
-            timestamp: '2026-01-01T00:00:00Z',
-          },
-          {
-            type: 'custom',
-            customType: 'neuralwatt-energy',
-            data: { energy_joules: 100 },
-            id: '2',
-            parentId: null,
-            timestamp: '2026-01-01T00:00:01Z',
-          },
-          {
-            type: 'custom',
-            customType: 'tps',
-            data: { tps: 20 },
-            id: '3',
-            parentId: null,
-            timestamp: '2026-01-01T00:00:02Z',
-          },
-        ]),
+        getEntries: vi.fn().mockReturnValue(allEntries),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as any;
+
+    await commands['tps-export'].handler('tps --full', exportCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('Exported 2 entries');
+    expect(msg).toContain('pi-telemetry-full-tps-');
+  });
+
+  it('should filter branch by customType', async () => {
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getBranch: vi.fn().mockReturnValue(branchEntries),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
     } as any;
@@ -1055,15 +1070,15 @@ describe('pi-tps extension', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('Exported 2 entries');
-    expect(msg).toContain('pi-telemetry-tps-');
+    expect(msg).toContain('Exported 1 entry');
+    expect(msg).toContain('pi-telemetry-branch-tps-');
   });
 
   it('should show warning when no matching entries found', async () => {
     const exportCtx = {
       ...mockCtx,
       sessionManager: {
-        getEntries: vi.fn().mockReturnValue([{ type: 'message', role: 'user', content: 'hello' }]),
+        getBranch: vi.fn().mockReturnValue([{ type: 'message', role: 'user', content: 'hello' }]),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
     } as any;
@@ -1072,8 +1087,8 @@ describe('pi-tps extension', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
-    expect(msg).toContain('No entries found');
-    expect(msg).toContain('nonexistent');
+    expect(msg).toContain('No matching entries found');
+    expect(msg).toContain('current-branch');
     expect(notifySpy).toHaveBeenCalledWith(msg, 'warning');
   });
 
@@ -1081,7 +1096,7 @@ describe('pi-tps extension', () => {
     const exportCtx = {
       ...mockCtx,
       sessionManager: {
-        getEntries: vi.fn().mockReturnValue([
+        getBranch: vi.fn().mockReturnValue([
           {
             type: 'custom',
             customType: 'neuralwatt-energy',
@@ -1109,7 +1124,7 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0] as string;
     expect(msg).toContain('Exported 1 entry');
-    expect(msg).toContain('pi-telemetry-neuralwatt-energy-');
+    expect(msg).toContain('pi-telemetry-branch-neuralwatt-energy-');
   });
 });
 
