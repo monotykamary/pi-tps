@@ -85,12 +85,6 @@ interface TurnTelemetry {
   timestamp: number;
 }
 
-/** Legacy format (for backward-compatible rehydration) */
-interface LegacyTPSData {
-  message: string;
-  timestamp: number;
-}
-
 /** In-memory state accumulated during one LLM turn */
 interface TurnTiming {
   turnStartMs: number;
@@ -237,15 +231,6 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
   };
 }
 
-/**
- * Detect if data is legacy format (has .message string) vs new structured format.
- */
-function isLegacyData(data: unknown): data is LegacyTPSData {
-  return (
-    typeof data === 'object' && data !== null && typeof (data as LegacyTPSData).message === 'string'
-  );
-}
-
 // ─── Extension ──────────────────────────────────────────────────────────────
 
 export default function tpsExtension(pi: ExtensionAPI) {
@@ -269,11 +254,9 @@ export default function tpsExtension(pi: ExtensionAPI) {
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
-        const data = entry.data as unknown;
-        if (!data) continue;
-        // Skip legacy entries — only rehydrate structured TurnTelemetry
-        if (isLegacyData(data)) continue;
-        const message = composeDisplayString(data as TurnTelemetry);
+        const data = entry.data as TurnTelemetry | null;
+        if (!data?.model) continue;
+        const message = composeDisplayString(data);
         setTimeout(() => {
           ctx.ui.notify(message, 'info');
         }, 0);
