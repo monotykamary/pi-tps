@@ -76,6 +76,7 @@ export interface TestFixture {
   commands: Record<string, { handler: (args: string, ctx: any) => Promise<void> }>;
   notifySpy: ReturnType<typeof vi.fn>;
   appendEntrySpy: ReturnType<typeof vi.fn>;
+  eventsEmitSpy: ReturnType<typeof vi.fn>;
   registerCommandSpy: ReturnType<typeof vi.fn>;
   mockEntries: Array<{ type?: string; role?: string; customType?: string; data?: unknown }>;
   mockCtx: ExtensionContext;
@@ -121,6 +122,8 @@ export function createTestFixture(): TestFixture {
     getSystemPrompt: vi.fn(),
   } as any as ExtensionContext;
 
+  const eventsEmitSpy = vi.fn();
+
   const mockPi: Partial<ExtensionAPI> = {
     on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
       handlers[event] = handler;
@@ -128,6 +131,7 @@ export function createTestFixture(): TestFixture {
     }),
     appendEntry: appendEntrySpy,
     registerCommand: registerCommandSpy,
+    events: { emit: eventsEmitSpy, on: vi.fn() },
   };
 
   return {
@@ -136,6 +140,7 @@ export function createTestFixture(): TestFixture {
     commands,
     notifySpy,
     appendEntrySpy,
+    eventsEmitSpy,
     registerCommandSpy,
     mockEntries,
     mockCtx,

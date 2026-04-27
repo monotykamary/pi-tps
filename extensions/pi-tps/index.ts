@@ -522,7 +522,6 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // Calculate, display, and persist telemetry at the end of each LLM turn
   pi.on('turn_end', (_event: TurnEndEvent, ctx: ExtensionContext) => {
-    if (!ctx.hasUI) return;
     if (!currentTiming) return;
 
     const timing = currentTiming;
@@ -532,12 +531,17 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const telemetry = buildTelemetry(timing, turnEndMs);
     if (!telemetry) return;
 
-    // Show notification immediately (composed from structured data)
-    const message = composeDisplayString(telemetry);
-    ctx.ui.notify(message, 'info');
-
     // Persist structured telemetry to session for export and rehydration
     pi.appendEntry('tps', telemetry);
+
+    // Emit event so other extensions can react to new telemetry
+    pi.events.emit('tps:telemetry', telemetry);
+
+    // Show notification only when UI is available
+    if (ctx.hasUI) {
+      const message = composeDisplayString(telemetry);
+      ctx.ui.notify(message, 'info');
+    }
 
     // Keep argument completion cache in sync with new entries
     cachedEntries.push({ type: 'custom', customType: 'tps' });
