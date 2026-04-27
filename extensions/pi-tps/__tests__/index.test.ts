@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from '@mariozechner/pi-coding-agent';
 
-// Event types not exported from main package - define locally
+// ─── Event types (mirrors extension/index.ts — not exported from pi's public API)
+
 interface TurnStartEvent {
   type: 'turn_start';
   turnIndex: number;
@@ -23,19 +28,12 @@ interface MessageStartEvent {
 interface MessageUpdateEvent {
   type: 'message_update';
   message: unknown;
-  assistantMessageEvent: {
-    type: string;
-    delta?: string;
-    partial?: unknown;
-    [key: string]: unknown;
-  };
 }
 
 interface MessageEndEvent {
   type: 'message_end';
   message: unknown;
 }
-
 import type { AssistantMessage } from '@mariozechner/pi-ai';
 
 // Helper to advance time
@@ -68,8 +66,22 @@ describe('pi-tps extension', () => {
       ui: { notify: notifySpy } as any,
       sessionManager: {
         getEntries: vi.fn().mockReturnValue(mockEntries),
+        getBranch: vi.fn(),
+        getSessionId: vi.fn(),
       },
-    } as unknown as ExtensionContext;
+      // Satisfy ExtensionContext requirements not used by the extension
+      modelRegistry: undefined as any,
+      model: undefined,
+      cwd: '/tmp',
+      isIdle: vi.fn(),
+      signal: undefined,
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(),
+      shutdown: vi.fn(),
+      getContextUsage: vi.fn(),
+      compact: vi.fn(),
+      getSystemPrompt: vi.fn(),
+    } as ExtensionContext;
 
     mockPi = {
       on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
@@ -1010,7 +1022,7 @@ describe('pi-tps extension', () => {
         getBranch: vi.fn().mockReturnValue(branchEntries),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
-    } as any;
+    } as ExtensionCommandContext;
 
     await commands['tps-export'].handler('', exportCtx);
 
@@ -1029,7 +1041,7 @@ describe('pi-tps extension', () => {
         getEntries: vi.fn().mockReturnValue(allEntries),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
-    } as any;
+    } as ExtensionCommandContext;
 
     await commands['tps-export'].handler('--full', exportCtx);
 
@@ -1047,7 +1059,7 @@ describe('pi-tps extension', () => {
         getEntries: vi.fn().mockReturnValue(allEntries),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
-    } as any;
+    } as ExtensionCommandContext;
 
     await commands['tps-export'].handler('tps --full', exportCtx);
 
@@ -1064,7 +1076,7 @@ describe('pi-tps extension', () => {
         getBranch: vi.fn().mockReturnValue(branchEntries),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
-    } as any;
+    } as ExtensionCommandContext;
 
     await commands['tps-export'].handler('tps', exportCtx);
 
@@ -1081,7 +1093,7 @@ describe('pi-tps extension', () => {
         getBranch: vi.fn().mockReturnValue([{ type: 'message', role: 'user', content: 'hello' }]),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
-    } as any;
+    } as ExtensionCommandContext;
 
     await commands['tps-export'].handler('nonexistent', exportCtx);
 
@@ -1116,7 +1128,7 @@ describe('pi-tps extension', () => {
         ]),
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
       },
-    } as any;
+    } as ExtensionCommandContext;
 
     // /tps-export neuralwatt-energy — should match exactly, not "energy"
     await commands['tps-export'].handler('neuralwatt-energy', exportCtx);

@@ -20,7 +20,10 @@ import type {
   ExtensionContext,
 } from '@mariozechner/pi-coding-agent';
 
-// ─── Event types not exported from main package ──────────────────────────────
+// ─── Event types (not exported from pi's public API) ────────────────────────
+// These mirror the internal types in @mariozechner/pi-coding-agent's
+// dist/core/extensions/types.d.ts. When pi starts exporting them, replace
+// these local definitions with imports.
 
 interface TurnStartEvent {
   type: 'turn_start';
@@ -43,12 +46,6 @@ interface MessageStartEvent {
 interface MessageUpdateEvent {
   type: 'message_update';
   message: unknown;
-  assistantMessageEvent: {
-    type: string;
-    delta?: string;
-    partial?: unknown;
-    [key: string]: unknown;
-  };
 }
 
 interface MessageEndEvent {
@@ -103,8 +100,11 @@ interface TurnTiming {
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
   if (!message || typeof message !== 'object') return false;
-  const role = (message as { role?: unknown }).role;
-  return role === 'assistant';
+  const msg = message as Record<string, unknown>;
+  if (msg.role !== 'assistant') return false;
+  // Guard: ensure usage exists before downstream code accesses it.
+  if (typeof msg.usage !== 'object' || msg.usage === null) return false;
+  return true;
 }
 
 function formatNumber(num: number): string {
@@ -211,12 +211,13 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
   if (output <= 0) return null;
   if (!timing.firstTokenMs) return null;
   if (timing.totalGenerationMs <= 0) return null;
+  if (!model) return null;
 
   const totalMs = Date.now() - timing.turnStartMs;
   const tps = output / (timing.totalGenerationMs / 1000);
 
   return {
-    model: model!,
+    model,
     tokens: { input, output, cacheRead, cacheWrite, total: totalTokens },
     timing: {
       ttftMs: timing.firstTokenMs - timing.turnStartMs,
@@ -365,7 +366,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
     }
 
     // Store this message to count its tokens later (only current turn's messages)
-    currentTiming.assistantMessages.push(event.message as AssistantMessage);
+    currentTiming.assistantMessages.push(event.message);
     currentTiming.lastUpdateMs = now;
   });
 
@@ -413,8 +414,9 @@ export default function tpsExtension(pi: ExtensionAPI) {
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       // Default: current branch. --full: entire session.
-      const full = args.includes('--full');
-      const filterType = args.replace('--full', '').trim() || null;
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const full = tokens.includes('--full');
+      const filterType = tokens.filter((t) => t !== '--full').join(' ') || null;
 
       // Collect all custom entries, optionally filtered by customType
       const entries = full ? ctx.sessionManager.getEntries() : ctx.sessionManager.getBranch();
