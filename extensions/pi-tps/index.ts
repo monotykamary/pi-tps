@@ -260,11 +260,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
   /**
    * Restore all TPS notifications from session entries on resume.
    * Handles both legacy (data.message string) and new (structured) formats.
-   * Deferred via setTimeout so it survives TUI clear+rebuild.
+   * Notifications are staggered (50ms apart) because showStatus replaces
+   * in place if the previous status is still visible.
    */
   function restoreTPSNotifications(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
     const entries = ctx.sessionManager.getEntries();
+    let stagger = 0;
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
@@ -280,7 +282,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
         }
         setTimeout(() => {
           ctx.ui.notify(message, 'info');
-        }, 0);
+        }, stagger);
+        stagger += 50;
       }
     }
   }

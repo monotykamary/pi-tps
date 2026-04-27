@@ -378,7 +378,7 @@ describe('pi-tps extension', () => {
     );
 
     handlers['session_start']?.({ reason: 'resume' }, mockCtx);
-    await tick(); // deferred via setTimeout(0)
+    await tick(60); // wait for staggered timeouts (0ms + 50ms)
 
     // Both entries should be shown (recent first since iteration is backwards)
     expect(notifySpy).toHaveBeenCalledTimes(2);
