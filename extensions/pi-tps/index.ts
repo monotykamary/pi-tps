@@ -335,14 +335,14 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
     const gap = now - currentTiming.lastUpdateMs;
 
-    // Detect stall: gap exceeds debounce threshold. Only the excess
-    // beyond the threshold counts as stall time (threshold is "normal" jitter).
+    // Detect stall: gap exceeds threshold. The full gap counts as stall
+    // time — the threshold is a detection gate, not a duration discount.
     if (gap >= STALL_THRESHOLD_MS) {
       if (!currentTiming.inStall) {
         currentTiming.stallCount++;
       }
       currentTiming.inStall = true;
-      currentTiming.stallMs += gap - STALL_THRESHOLD_MS;
+      currentTiming.stallMs += gap;
     } else {
       currentTiming.inStall = false;
     }
