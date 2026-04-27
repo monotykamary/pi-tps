@@ -28,6 +28,12 @@ interface MessageEndEvent {
   message: unknown;
 }
 
+interface SessionTreeEvent {
+  type: 'session_tree';
+  newLeafId: string | null;
+  oldLeafId: string | null;
+}
+
 interface TPSData {
   message: string;
   timestamp: number;
@@ -147,24 +153,35 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // Track if we've seen any assistant messages in this turn
   let hasSeenAssistantMessage = false;
 
-  // Restore notification on session resume if we have saved stats
-  pi.on('session_start', (event, ctx) => {
+  // Shared rehydration logic: restore the most recent TPS notification.
+  // Deferred via setTimeout so it survives the TUI clear+rebuild that
+  // interactive mode performs immediately after session_tree / session_start.
+  function restoreTPSNotification(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
-    // Only restore for existing sessions (resume, fork, switch), not new ones
-    if (event.reason === 'startup' || event.reason === 'reload') return;
-
     const entries = ctx.sessionManager.getEntries();
-    // Find the most recent TPS entry
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
         const data = entry.data as TPSData;
         if (data?.message) {
-          ctx.ui.notify(data.message, 'info');
+          setTimeout(() => {
+            ctx.ui.notify(data.message, 'info');
+          }, 0);
         }
         break;
       }
     }
+  }
+
+  // Restore notification on session start/resume — skip only brand-new sessions
+  pi.on('session_start', (event, ctx) => {
+    if (event.reason === 'new') return;
+    restoreTPSNotification(ctx);
+  });
+
+  // Restore notification after /tree navigation (same session, different branch)
+  pi.on('session_tree', (_event: SessionTreeEvent, ctx: ExtensionContext) => {
+    restoreTPSNotification(ctx);
   });
 
   // Track when a turn starts (request sent to LLM)

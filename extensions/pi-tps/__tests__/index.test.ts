@@ -73,6 +73,7 @@ describe('pi-tps extension', () => {
 
   it('should register all required event handlers', () => {
     expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('session_tree', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('turn_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('message_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('message_end', expect.any(Function));
@@ -149,7 +150,7 @@ describe('pi-tps extension', () => {
     expect(data.timestamp).toBeTypeOf('number');
   });
 
-  it('should restore notification on session resume if entry exists', () => {
+  it('should restore notification on session resume if entry exists', async () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
@@ -159,13 +160,42 @@ describe('pi-tps extension', () => {
       },
     });
 
-    handlers['session_start']?.({ reason: 'switch' }, mockCtx);
+    handlers['session_start']?.({ reason: 'resume' }, mockCtx);
+    await tick(); // deferred via setTimeout(0)
 
     expect(notifySpy).toHaveBeenCalledOnce();
     expect(notifySpy).toHaveBeenCalledWith(
       'TPS 42.0 tok/s · TTFT 1.2s · 5.0s · out 100 · in 50',
       'info'
     );
+  });
+
+  it('should restore notification on session startup (continuing previous session)', async () => {
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
+    });
+
+    handlers['session_start']?.({ reason: 'startup' }, mockCtx);
+    await tick(); // deferred via setTimeout(0)
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s · TTFT 1.0s · 3.0s', 'info');
+  });
+
+  it('should restore notification on session reload', async () => {
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
+    });
+
+    handlers['session_start']?.({ reason: 'reload' }, mockCtx);
+    await tick(); // deferred via setTimeout(0)
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s · TTFT 1.0s · 3.0s', 'info');
   });
 
   it('should not restore notification on session start for new sessions', () => {
@@ -175,12 +205,26 @@ describe('pi-tps extension', () => {
       data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
     });
 
-    handlers['session_start']?.({ reason: 'startup' }, mockCtx);
+    handlers['session_start']?.({ reason: 'new' }, mockCtx);
 
     expect(notifySpy).not.toHaveBeenCalled();
   });
 
-  it('should restore the most recent TPS entry on resume', () => {
+  it('should restore notification on tree navigation', async () => {
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
+    });
+
+    handlers['session_tree']?.({ newLeafId: 'abc123', oldLeafId: 'def456' }, mockCtx);
+    await tick(); // deferred via setTimeout(0)
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s · TTFT 1.0s · 3.0s', 'info');
+  });
+
+  it('should restore the most recent TPS entry on resume', async () => {
     mockEntries.push(
       {
         type: 'custom',
@@ -195,6 +239,7 @@ describe('pi-tps extension', () => {
     );
 
     handlers['session_start']?.({ reason: 'resume' }, mockCtx);
+    await tick(); // deferred via setTimeout(0)
 
     expect(notifySpy).toHaveBeenCalledOnce();
     expect(notifySpy).toHaveBeenCalledWith('TPS 50.0 tok/s recent', 'info');
