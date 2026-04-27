@@ -79,6 +79,13 @@ interface TurnTelemetry {
     messageCount: number; // assistant messages in this turn
   };
   tps: number | null; // output / (generationMs / 1000)
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  } | null;
   timestamp: number;
 }
 
@@ -195,6 +202,12 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
   let cacheRead = 0;
   let cacheWrite = 0;
   let totalTokens = 0;
+  let costInput = 0;
+  let costOutput = 0;
+  let costCacheRead = 0;
+  let costCacheWrite = 0;
+  let costTotal = 0;
+  let hasCost = false;
   let model: { provider: string; modelId: string } | null = null;
 
   for (const message of timing.assistantMessages) {
@@ -203,6 +216,14 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
     cacheRead += message.usage.cacheRead || 0;
     cacheWrite += message.usage.cacheWrite || 0;
     totalTokens += message.usage.totalTokens || 0;
+    if (message.usage.cost) {
+      costInput += message.usage.cost.input || 0;
+      costOutput += message.usage.cost.output || 0;
+      costCacheRead += message.usage.cost.cacheRead || 0;
+      costCacheWrite += message.usage.cost.cacheWrite || 0;
+      costTotal += message.usage.cost.total || 0;
+      hasCost = true;
+    }
     if (!model && message.provider && message.model) {
       model = { provider: message.provider, modelId: message.model };
     }
@@ -228,6 +249,15 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
       messageCount: timing.messageCount,
     },
     tps: Math.round(tps * 10) / 10,
+    cost: hasCost
+      ? {
+          input: costInput,
+          output: costOutput,
+          cacheRead: costCacheRead,
+          cacheWrite: costCacheWrite,
+          total: costTotal,
+        }
+      : null,
     timestamp: Date.now(),
   };
 }
