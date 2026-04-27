@@ -96,6 +96,11 @@ describe('pi-tps extension — telemetry flow', () => {
     expect(data.timing.messageCount).toBe(1);
     expect(data.tps).toBeGreaterThan(0);
     expect(data.timestamp).toBeTypeOf('number');
+
+    // Verify event was emitted with the same telemetry
+    expect(fixture.eventsEmitSpy).toHaveBeenCalledOnce();
+    expect(fixture.eventsEmitSpy.mock.calls[0][0]).toBe('tps:telemetry');
+    expect(fixture.eventsEmitSpy.mock.calls[0][1]).toEqual(data);
   });
 
   // ── Token aggregation across multiple messages per turn ──────────────────
@@ -230,8 +235,8 @@ describe('pi-tps extension — telemetry flow', () => {
 
   // ── UI-less mode ─────────────────────────────────────────────────────────
 
-  it('should skip notification and persist when hasUI is false', async () => {
-    const { handlers, notifySpy, appendEntrySpy } = fixture;
+  it('should persist and emit telemetry but skip notification when hasUI is false', async () => {
+    const { handlers, notifySpy, appendEntrySpy, eventsEmitSpy } = fixture;
     const noUiCtx = { ...fixture.mockCtx, hasUI: false };
 
     const assistantMessage = makeAssistantMessage({ output: 20, input: 10 });
@@ -253,7 +258,11 @@ describe('pi-tps extension — telemetry flow', () => {
     );
 
     expect(notifySpy).not.toHaveBeenCalled();
-    expect(appendEntrySpy).not.toHaveBeenCalled();
+    expect(appendEntrySpy).toHaveBeenCalledOnce();
+    expect(appendEntrySpy.mock.calls[0][0]).toBe('tps');
+    expect(eventsEmitSpy).toHaveBeenCalledOnce();
+    expect(eventsEmitSpy.mock.calls[0][0]).toBe('tps:telemetry');
+    expect(eventsEmitSpy.mock.calls[0][1]).toEqual(appendEntrySpy.mock.calls[0][1]);
   });
 
   // ── Zero output ──────────────────────────────────────────────────────────
