@@ -234,7 +234,7 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
   if (timing.totalGenerationMs <= 0) return null;
   if (!model) return null;
 
-  const totalMs = Date.now() - timing.turnStartMs;
+  const totalMs = performance.now() - timing.turnStartMs;
   const tps = output / (timing.totalGenerationMs / 1000);
 
   return {
@@ -314,7 +314,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // Track when a turn starts (request sent to LLM)
   pi.on('turn_start', (event: TurnStartEvent) => {
     currentTiming = {
-      turnStartMs: event.timestamp,
+      turnStartMs: performance.now(),
       lastUpdateMs: event.timestamp,
       firstTokenMs: null,
       currentMessageStartMs: null,
@@ -334,7 +334,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    const now = Date.now();
+    const now = performance.now();
 
     // Track when THIS message started streaming (for generation TPS)
     currentTiming.currentMessageStartMs = now;
@@ -353,7 +353,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    const now = Date.now();
+    const now = performance.now();
 
     // First token: capture TTFT and seed stall timing, then bail.
     // No stall detection on this event — the gap from message_start to
@@ -386,7 +386,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
     if (!currentTiming) return;
     if (!isAssistantMessage(event.message)) return;
 
-    const now = Date.now();
+    const now = performance.now();
 
     // Accumulate ACTUAL streaming time for this message (true generation time)
     if (currentTiming.currentMessageStartMs) {

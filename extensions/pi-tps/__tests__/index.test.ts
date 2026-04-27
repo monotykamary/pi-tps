@@ -934,6 +934,174 @@ describe('pi-tps extension', () => {
     expect(data.timing.stallMs).toBe(0);
   });
 
+  // ── performance.now() precision for short generation spans ──────────────
+
+  /**
+   * Drive a full turn with mocked performance.now() timestamps.
+   * This avoids real-timer flakiness and tests sub-millisecond precision
+   * that Date.now() (1ms floor) would lose.
+   */
+  function driveTurn(clocks: {
+    turnStart: number;
+    messageStart: number;
+    firstUpdate: number;
+    messageEnd: number;
+  }) {
+    const callLog: number[] = [];
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => {
+      // Return the next clock value for each call in sequence
+      const next =
+        callLog.length < Object.values(clocks).length
+          ? Object.values(clocks)[callLog.length]
+          : clocks.messageEnd; // fallback after all values consumed
+      callLog.push(next);
+      return next;
+    });
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Short reply' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 50,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 70,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: Date.now() });
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    });
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      mockCtx
+    );
+
+    spy.mockRestore();
+    return { notifySpy, appendEntrySpy };
+  }
+
+  it('should produce realistic TPS for short generation spans with performance.now()', () => {
+    // 20 output tokens over 500ms generation → 40 TPS (realistic)
+    // With Date.now(), this same span might round down to 0ms or 1ms,
+    // giving 20/0.001 = 20,000 TPS or division by zero.
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 200, // TTFT = 200ms
+      firstUpdate: 200.123, // first token at sub-ms precision
+      messageEnd: 700, // generation = 500ms
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
+    expect(tpsMatch).toBeTruthy();
+    const tps = parseFloat(tpsMatch![1]);
+    // 20 tokens / 0.5s = 40.0 TPS — realistic for GPU inference
+    expect(tps).toBeGreaterThanOrEqual(35);
+    expect(tps).toBeLessThanOrEqual(45);
+
+    // Verify structured telemetry reflects precise timing
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.timing.generationMs).toBeGreaterThanOrEqual(490);
+    expect(data.timing.ttftMs).toBeGreaterThanOrEqual(190);
+  });
+
+  it('should capture sub-millisecond TTFT precision', () => {
+    // TTFT of 23.456ms — Date.now() would round to 23 or 24ms
+    const { appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 23.456,
+      firstUpdate: 23.579,
+      messageEnd: 523.456,
+    });
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    // TTFT should be close to 23.456ms (not rounded to integer)
+    expect(data.timing.ttftMs).toBeGreaterThanOrEqual(23);
+    expect(data.timing.ttftMs).toBeLessThanOrEqual(24);
+  });
+
+  it('should not lose telemetry when generation spans < 1ms with Date.now() resolution', () => {
+    // A 0.5ms generation span: Date.now() would return the same ms value
+    // for both start and end, giving generationMs = 0 → null telemetry.
+    // performance.now() captures the real 0.5ms → TPS is computed.
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.05,
+      messageEnd: 100.5,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const [, data] = appendEntrySpy.mock.calls[0];
+    // generationMs should be ~0.5ms, NOT 0
+    expect(data.timing.generationMs).toBeGreaterThan(0);
+    // 20 tokens / 0.0005s = 40,000 TPS — still high, but at least
+    // the measurement is honest (the model truly was that fast for
+    // a tiny response). The key improvement: we don't lose the data point.
+    expect(data.tps).toBeGreaterThan(0);
+  });
+
+  it('should use performance.now() consistently across all timing events', () => {
+    // Verify that turn_start, message_start, message_update, message_end
+    // all use performance.now() by driving a turn where the gap between
+    // message_start and message_end is exactly 1.234ms.
+    // If any event still used Date.now(), generationMs would be rounded.
+    const spy = vi.spyOn(performance, 'now');
+    const timestamps = [0, 100, 100.001, 101.234];
+    let callIdx = 0;
+    spy.mockImplementation(() => timestamps[Math.min(callIdx++, timestamps.length - 1)]);
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hi' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: Date.now() });
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    });
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      mockCtx
+    );
+
+    // Capture call count before restoring (restoration clears mock state)
+    const callCount = spy.mock.calls.length;
+    spy.mockRestore();
+
+    // performance.now() should have been called for every timing event
+    expect(callCount).toBeGreaterThanOrEqual(4);
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    // generationMs = messageEnd - messageStart = 101.234 - 100 = 1.234ms
+    // Date.now() would round this to 1 or 2ms; performance.now() captures it
+    expect(data.timing.generationMs).toBeGreaterThan(1);
+  });
+
   // ── Model tracking ──────────────────────────────────────────────────────
 
   it('should capture model info from first assistant message', async () => {
