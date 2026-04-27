@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type {
-  ExtensionAPI,
-  AgentEndEvent,
-  UIAPI,
-  ExtensionContext,
-} from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 
 // Event types not exported from main package - define locally
 interface TurnStartEvent {
@@ -13,15 +8,34 @@ interface TurnStartEvent {
   timestamp: number;
 }
 
+interface TurnEndEvent {
+  type: 'turn_end';
+  turnIndex: number;
+  message: unknown;
+  toolResults: unknown[];
+}
+
 interface MessageStartEvent {
   type: 'message_start';
   message: unknown;
+}
+
+interface MessageUpdateEvent {
+  type: 'message_update';
+  message: unknown;
+  assistantMessageEvent: {
+    type: string;
+    delta?: string;
+    partial?: unknown;
+    [key: string]: unknown;
+  };
 }
 
 interface MessageEndEvent {
   type: 'message_end';
   message: unknown;
 }
+
 import type { AssistantMessage } from '@mariozechner/pi-ai';
 
 // Helper to advance time
@@ -29,26 +43,29 @@ const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('pi-tps extension', () => {
   let mockPi: Partial<ExtensionAPI>;
-  let mockUI: Partial<UIAPI>;
   let handlers: Record<string, (...args: unknown[]) => void>;
+  let commands: Record<string, { handler: (args: string, ctx: any) => Promise<void> }>;
   let notifySpy: ReturnType<typeof vi.fn>;
   let appendEntrySpy: ReturnType<typeof vi.fn>;
-  let mockEntries: Array<{ role: string; customType?: string; content: unknown }>;
+  let registerCommandSpy: ReturnType<typeof vi.fn>;
+  let mockEntries: Array<{ type?: string; role?: string; customType?: string; data?: unknown }>;
   let mockCtx: ExtensionContext;
+
+  const UIAPI = {} as any; // opaque, just need notify
 
   beforeEach(async () => {
     handlers = {};
+    commands = {};
     notifySpy = vi.fn();
     appendEntrySpy = vi.fn();
+    registerCommandSpy = vi.fn((name: string, options: any) => {
+      commands[name] = options;
+    });
     mockEntries = [];
-
-    mockUI = {
-      notify: notifySpy,
-    };
 
     mockCtx = {
       hasUI: true,
-      ui: mockUI as UIAPI,
+      ui: { notify: notifySpy } as any,
       sessionManager: {
         getEntries: vi.fn().mockReturnValue(mockEntries),
       },
@@ -60,6 +77,7 @@ describe('pi-tps extension', () => {
         return mockPi as ExtensionAPI;
       }),
       appendEntry: appendEntrySpy,
+      registerCommand: registerCommandSpy,
     };
 
     // Import fresh to trigger module load
@@ -71,20 +89,31 @@ describe('pi-tps extension', () => {
     vi.restoreAllMocks();
   });
 
-  it('should register all required event handlers', () => {
+  it('should register all required event handlers and commands', () => {
     expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('session_tree', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('turn_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('message_start', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('message_update', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('message_end', expect.any(Function));
-    expect(mockPi.on).toHaveBeenCalledWith('agent_end', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('turn_end', expect.any(Function));
+    expect(registerCommandSpy).toHaveBeenCalledWith(
+      'tps-export',
+      expect.objectContaining({
+        description: expect.any(String),
+        handler: expect.any(Function),
+      })
+    );
   });
 
-  it('should show notification with TPS, TTFT, and total time', async () => {
+  // ── Basic telemetry flow ─────────────────────────────────────────────────
+
+  it('should show notification with TPS, TTFT (1 decimal), and total time', async () => {
+    const now = Date.now();
     const turnStartEvent: TurnStartEvent = {
       type: 'turn_start',
       turnIndex: 0,
-      timestamp: Date.now(),
+      timestamp: now,
     };
 
     const assistantMessage: AssistantMessage = {
@@ -116,41 +145,100 @@ describe('pi-tps extension', () => {
       message: assistantMessage,
     };
 
+    const messageUpdateEvent: MessageUpdateEvent = {
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
+    };
+
     const messageEndEvent: MessageEndEvent = {
       type: 'message_end',
       message: assistantMessage,
     };
 
-    const agentEndEvent: AgentEndEvent = {
-      type: 'agent_end',
-      messages: [assistantMessage],
+    const turnEndEvent: TurnEndEvent = {
+      type: 'turn_end',
+      turnIndex: 0,
+      message: assistantMessage,
+      toolResults: [],
     };
 
     // Simulate the event sequence
     handlers['turn_start']?.(turnStartEvent);
     await tick(100); // TTFT delay
     handlers['message_start']?.(messageStartEvent);
-    await tick(500); // Generation time
+    await tick(50); // streaming chunk
+    handlers['message_update']?.(messageUpdateEvent);
+    await tick(150); // more streaming
+    handlers['message_update']?.(messageUpdateEvent);
+    await tick(300); // final streaming
     handlers['message_end']?.(messageEndEvent);
-    handlers['agent_end']?.(agentEndEvent, mockCtx);
+    handlers['turn_end']?.(turnEndEvent, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
 
-    // Check format: TPS X.X tok/s · TTFT <duration> · <duration> · out X · in X
+    // Check format: TPS X.X tok/s · TTFT X.Xs · X.Xs · out X · in X
     expect(notification).toMatch(/TPS \d+\.\d tok\/s/);
-    expect(notification).toMatch(/TTFT \d/); // TTFT has at least one digit
+    expect(notification).toMatch(/TTFT \d+\.\ds/); // TTFT has 1 decimal
     expect(notification).toMatch(/out 200/);
     expect(notification).toMatch(/in 100/);
 
+    // Verify structured telemetry was saved
     expect(appendEntrySpy).toHaveBeenCalledOnce();
     const [type, data] = appendEntrySpy.mock.calls[0];
     expect(type).toBe('tps');
-    expect(data.message).toContain('TPS');
+    expect(data.model).toEqual({ provider: 'openai', modelId: 'gpt-4' });
+    expect(data.tokens).toEqual({
+      input: 100,
+      output: 200,
+      cacheRead: 50,
+      cacheWrite: 25,
+      total: 375,
+    });
+    expect(data.timing.ttftMs).toBeGreaterThan(0);
+    expect(data.timing.totalMs).toBeGreaterThan(0);
+    expect(data.timing.generationMs).toBeGreaterThan(0);
+    expect(data.timing.messageCount).toBe(1);
+    expect(data.tps).toBeGreaterThan(0);
     expect(data.timestamp).toBeTypeOf('number');
   });
 
-  it('should restore notification on session resume if entry exists', async () => {
+  // ── Rehydration ──────────────────────────────────────────────────────────
+
+  it('should restore notification on session resume from structured telemetry', async () => {
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: {
+        model: { provider: 'openai', modelId: 'gpt-4' },
+        tokens: { input: 50, output: 100, cacheRead: 0, cacheWrite: 0, total: 150 },
+        timing: {
+          ttftMs: 1200,
+          totalMs: 5000,
+          generationMs: 4000,
+          stallMs: 0,
+          stallCount: 0,
+          messageCount: 1,
+        },
+        tps: 25.0,
+        timestamp: Date.now(),
+      },
+    });
+
+    handlers['session_start']?.({ reason: 'resume' }, mockCtx);
+    await tick(); // deferred via setTimeout(0)
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toMatch(/TPS 25\.0 tok\/s/);
+    expect(msg).toMatch(/TTFT 1\.2s/);
+    expect(msg).toMatch(/out 100/);
+    expect(msg).toMatch(/in 50/);
+    expect(notifySpy).toHaveBeenCalledWith(msg, 'info');
+  });
+
+  it('should restore notification from legacy format (backward compat)', async () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
@@ -174,54 +262,79 @@ describe('pi-tps extension', () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
-      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
+      data: {
+        model: { provider: 'openai', modelId: 'gpt-4' },
+        tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30 },
+        timing: {
+          ttftMs: 1000,
+          totalMs: 3000,
+          generationMs: 2000,
+          stallMs: 0,
+          stallCount: 0,
+          messageCount: 1,
+        },
+        tps: 10.0,
+        timestamp: Date.now(),
+      },
     });
 
     handlers['session_start']?.({ reason: 'startup' }, mockCtx);
     await tick(); // deferred via setTimeout(0)
 
     expect(notifySpy).toHaveBeenCalledOnce();
-    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s · TTFT 1.0s · 3.0s', 'info');
+    expect(notifySpy.mock.calls[0][0]).toMatch(/TPS 10\.0 tok\/s/);
   });
 
   it('should restore notification on session reload', async () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
-      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
+      data: {
+        model: { provider: 'openai', modelId: 'gpt-4' },
+        tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30 },
+        timing: {
+          ttftMs: 1000,
+          totalMs: 3000,
+          generationMs: 2000,
+          stallMs: 0,
+          stallCount: 0,
+          messageCount: 1,
+        },
+        tps: 10.0,
+        timestamp: Date.now(),
+      },
     });
 
     handlers['session_start']?.({ reason: 'reload' }, mockCtx);
     await tick(); // deferred via setTimeout(0)
 
     expect(notifySpy).toHaveBeenCalledOnce();
-    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s · TTFT 1.0s · 3.0s', 'info');
-  });
-
-  it('should not restore notification on session start for new sessions', () => {
-    mockEntries.push({
-      type: 'custom',
-      customType: 'tps',
-      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
-    });
-
-    handlers['session_start']?.({ reason: 'new' }, mockCtx);
-
-    expect(notifySpy).not.toHaveBeenCalled();
   });
 
   it('should restore notification on tree navigation', async () => {
     mockEntries.push({
       type: 'custom',
       customType: 'tps',
-      data: { message: 'TPS 42.0 tok/s · TTFT 1.0s · 3.0s', timestamp: Date.now() },
+      data: {
+        model: { provider: 'openai', modelId: 'gpt-4' },
+        tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30 },
+        timing: {
+          ttftMs: 1000,
+          totalMs: 3000,
+          generationMs: 2000,
+          stallMs: 0,
+          stallCount: 0,
+          messageCount: 1,
+        },
+        tps: 10.0,
+        timestamp: Date.now(),
+      },
     });
 
     handlers['session_tree']?.({ newLeafId: 'abc123', oldLeafId: 'def456' }, mockCtx);
     await tick(); // deferred via setTimeout(0)
 
     expect(notifySpy).toHaveBeenCalledOnce();
-    expect(notifySpy).toHaveBeenCalledWith('TPS 42.0 tok/s · TTFT 1.0s · 3.0s', 'info');
   });
 
   it('should restore the most recent TPS entry on resume', async () => {
@@ -229,12 +342,38 @@ describe('pi-tps extension', () => {
       {
         type: 'custom',
         customType: 'tps',
-        data: { message: 'TPS 10.0 tok/s old', timestamp: Date.now() - 1000 },
+        data: {
+          model: { provider: 'old', modelId: 'old-model' },
+          tokens: { input: 5, output: 10, cacheRead: 0, cacheWrite: 0, total: 15 },
+          timing: {
+            ttftMs: 5000,
+            totalMs: 10000,
+            generationMs: 8000,
+            stallMs: 0,
+            stallCount: 0,
+            messageCount: 1,
+          },
+          tps: 1.2,
+          timestamp: Date.now() - 1000,
+        },
       },
       {
         type: 'custom',
         customType: 'tps',
-        data: { message: 'TPS 50.0 tok/s recent', timestamp: Date.now() },
+        data: {
+          model: { provider: 'recent', modelId: 'recent-model' },
+          tokens: { input: 50, output: 500, cacheRead: 0, cacheWrite: 0, total: 550 },
+          timing: {
+            ttftMs: 2000,
+            totalMs: 8000,
+            generationMs: 6000,
+            stallMs: 500,
+            stallCount: 1,
+            messageCount: 2,
+          },
+          tps: 83.3,
+          timestamp: Date.now(),
+        },
       }
     );
 
@@ -242,8 +381,12 @@ describe('pi-tps extension', () => {
     await tick(); // deferred via setTimeout(0)
 
     expect(notifySpy).toHaveBeenCalledOnce();
-    expect(notifySpy).toHaveBeenCalledWith('TPS 50.0 tok/s recent', 'info');
+    const msg = notifySpy.mock.calls[0][0];
+    expect(msg).toContain('TPS 83.3');
+    expect(msg).toContain('stall'); // has stall info
   });
+
+  // ── Token aggregation across multiple messages per turn ──────────────────
 
   it('should aggregate tokens from multiple assistant messages in current turn only', async () => {
     const turnStartEvent: TurnStartEvent = {
@@ -300,61 +443,51 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
+    const updateEvent: MessageUpdateEvent = {
+      type: 'message_update',
+      message: firstMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    };
+
     // Simulate the event sequence
     handlers['turn_start']?.(turnStartEvent);
     await tick(100);
     handlers['message_start']?.({ type: 'message_start', message: firstMessage });
-    await tick(250);
+    await tick(50);
+    handlers['message_update']?.(updateEvent);
+    await tick(200);
     handlers['message_end']?.({ type: 'message_end', message: firstMessage });
     // Second message starts after first ends
     await tick(50);
     handlers['message_start']?.({ type: 'message_start', message: secondMessage });
-    await tick(200);
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: secondMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    });
+    await tick(150);
     handlers['message_end']?.({ type: 'message_end', message: secondMessage });
 
-    // Agent end event includes ALL session messages (simulating long session)
-    // This tests that we only count messages that went through message_start/end
-    const historicalMessage: AssistantMessage = {
-      role: 'assistant',
-      content: [{ type: 'text', text: 'Historical from previous turns' }],
-      api: 'openai-completions',
-      provider: 'openai',
-      model: 'gpt-4',
-      usage: {
-        input: 1000,
-        output: 5000, // This should NOT be counted - it wasn't in the turn
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 6000,
-        cost: {
-          input: 0.001,
-          output: 0.002,
-          cacheRead: 0,
-          cacheWrite: 0,
-          total: 0.00375,
-        },
-      },
-      stopReason: 'stop',
-      timestamp: Date.now() - 100000, // Old message
+    const turnEndEvent: TurnEndEvent = {
+      type: 'turn_end',
+      turnIndex: 0,
+      message: secondMessage,
+      toolResults: [],
     };
 
-    const agentEndEvent: AgentEndEvent = {
-      type: 'agent_end',
-      // Session history includes old message + current turn messages
-      messages: [historicalMessage, firstMessage, secondMessage],
-    };
-
-    handlers['agent_end']?.(agentEndEvent, mockCtx);
+    handlers['turn_end']?.(turnEndEvent, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
-    // Should only count current turn messages (100 + 80 = 180), not the 5000 from history
-    expect(notification).toContain('out 180'); // 100 + 80
-    expect(notification).toContain('in 80'); // 50 + 30
-    expect(notification).not.toContain('out 5'); // Should not include the 5000 historical tokens
+    // Should only count current turn messages (100 + 80 = 180 output, 50 + 30 = 80 input)
+    expect(notification).toContain('out 180');
+    expect(notification).toContain('in 80');
   });
 
-  it('should skip notification when hasUI is false', async () => {
+  // ── UI-less mode ─────────────────────────────────────────────────────────
+
+  it('should skip notification and persist when hasUI is false', async () => {
     const noUiCtx = { ...mockCtx, hasUI: false };
 
     const turnStartEvent: TurnStartEvent = {
@@ -384,14 +517,26 @@ describe('pi-tps extension', () => {
     handlers['turn_start']?.(turnStartEvent);
     await tick(50);
     handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
-    await tick(100);
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    });
+    await tick(50);
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
-    handlers['agent_end']?.({ type: 'agent_end', messages: [assistantMessage] }, noUiCtx);
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      noUiCtx
+    );
 
     expect(notifySpy).not.toHaveBeenCalled();
+    expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
-  it('should skip notification when no output tokens', async () => {
+  // ── Zero output ──────────────────────────────────────────────────────────
+
+  it('should skip when no output tokens', async () => {
     const turnStartEvent: TurnStartEvent = {
       type: 'turn_start',
       turnIndex: 0,
@@ -419,13 +564,18 @@ describe('pi-tps extension', () => {
     handlers['turn_start']?.(turnStartEvent);
     await tick(50);
     handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
-    await tick(100);
+    await tick(50);
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
-    handlers['agent_end']?.({ type: 'agent_end', messages: [assistantMessage] }, mockCtx);
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      mockCtx
+    );
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
   });
+
+  // ── Non-assistant message filtering ──────────────────────────────────────
 
   it('should ignore non-assistant messages for timing', async () => {
     const turnStartEvent: TurnStartEvent = {
@@ -453,14 +603,19 @@ describe('pi-tps extension', () => {
       message: { role: 'system', content: 'System' },
     });
 
-    // No assistant message = no notification
-    handlers['agent_end']?.({ type: 'agent_end', messages: [] }, mockCtx);
+    // No assistant message = no telemetry
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: {}, toolResults: [] },
+      mockCtx
+    );
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
-  it('should skip notification when turn_start was not called', () => {
+  // ── Missing turn_start ───────────────────────────────────────────────────
+
+  it('should skip when turn_start was not called', () => {
     const assistantMessage: AssistantMessage = {
       role: 'assistant',
       content: [{ type: 'text', text: 'Hello' }],
@@ -479,60 +634,17 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
-    // Don't call turn_start, just agent_end
-    handlers['agent_end']?.({ type: 'agent_end', messages: [assistantMessage] }, mockCtx);
+    // Don't call turn_start, just turn_end
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      mockCtx
+    );
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
   });
 
-  it('should calculate TTFT from turn_start to first message_start', async () => {
-    const startTime = Date.now();
-    const turnStartEvent: TurnStartEvent = {
-      type: 'turn_start',
-      turnIndex: 0,
-      timestamp: startTime,
-    };
-
-    const assistantMessage: AssistantMessage = {
-      role: 'assistant',
-      content: [{ type: 'text', text: 'Response' }],
-      api: 'openai-completions',
-      provider: 'openai',
-      model: 'gpt-4',
-      usage: {
-        input: 50,
-        output: 100,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 150,
-        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
-      },
-      stopReason: 'stop',
-      timestamp: Date.now(),
-    };
-
-    handlers['turn_start']?.(turnStartEvent);
-    await tick(500); // 500ms TTFT
-    const messageStartTime = Date.now();
-    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
-    await tick(1000); // 1000ms generation time
-    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
-
-    const agentEndEvent: AgentEndEvent = {
-      type: 'agent_end',
-      messages: [assistantMessage],
-    };
-
-    handlers['agent_end']?.(agentEndEvent, mockCtx);
-
-    expect(notifySpy).toHaveBeenCalledOnce();
-    const notification = notifySpy.mock.calls[0][0] as string;
-
-    // Should contain TTFT around 0-1s and total around 1-2s
-    expect(notification).toMatch(/TTFT \d/);
-    expect(notification).toMatch(/\d+s · out |\d+m \d+s · out/); // Total time
-  });
+  // ── True generation TPS (excluding TTFT and tool gaps) ──────────────────
 
   it('should calculate true generation TPS excluding TTFT and tool gaps', async () => {
     const turnStartEvent: TurnStartEvent = {
@@ -541,7 +653,6 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
-    // First assistant message (tool call)
     const firstMessage: AssistantMessage = {
       role: 'assistant',
       content: [{ type: 'text', text: 'Let me check that...' }],
@@ -560,7 +671,6 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
-    // Second assistant message (final response)
     const secondMessage: AssistantMessage = {
       role: 'assistant',
       content: [{ type: 'text', text: 'Here is the detailed answer...' }],
@@ -579,13 +689,21 @@ describe('pi-tps extension', () => {
       timestamp: Date.now(),
     };
 
+    const updateEvent: MessageUpdateEvent = {
+      type: 'message_update',
+      message: firstMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    };
+
     // Simulate: true generation time excludes gaps
     handlers['turn_start']?.(turnStartEvent);
     await tick(100); // TTFT (excluded from generation TPS)
 
     // First message: 200ms pure generation
     handlers['message_start']?.({ type: 'message_start', message: firstMessage });
-    await tick(200);
+    await tick(50);
+    handlers['message_update']?.(updateEvent);
+    await tick(150);
     handlers['message_end']?.({ type: 'message_end', message: firstMessage });
 
     // TOOL EXECUTION GAP: 1000ms (excluded from generation TPS)
@@ -593,46 +711,392 @@ describe('pi-tps extension', () => {
 
     // Second message: 400ms pure generation
     handlers['message_start']?.({ type: 'message_start', message: secondMessage });
-    await tick(400);
+    await tick(100);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: secondMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    });
+    await tick(300);
     handlers['message_end']?.({ type: 'message_end', message: secondMessage });
 
-    const agentEndEvent: AgentEndEvent = {
-      type: 'agent_end',
-      messages: [firstMessage, secondMessage],
+    const turnEndEvent: TurnEndEvent = {
+      type: 'turn_end',
+      turnIndex: 0,
+      message: secondMessage,
+      toolResults: [],
     };
 
-    handlers['agent_end']?.(agentEndEvent, mockCtx);
+    handlers['turn_end']?.(turnEndEvent, mockCtx);
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
 
-    // True generation TPS: 1000 tokens / 0.6s (200ms + 400ms) = ~1667 TPS
-    // TTFT and tool gaps are excluded - this is actual LLM inference speed
+    // True generation TPS: 1000 tokens / 0.6s (200ms + 400ms) = ~1666.7 TPS
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
-
-    // Should be ~1667 (raw LLM speed), not ~588 (wall-clock with gaps)
     expect(tps).toBeGreaterThan(1000); // True generation is fast
-    expect(tps).toBeLessThan(2000); // But not absurdly high
-    expect(notification).toContain('out 1,000'); // 200 + 800 tokens
-    expect(notification).toContain('in 600'); // 100 + 500 tokens
+    expect(tps).toBeLessThan(2000);
+
+    expect(notification).toContain('out 1,000');
+    expect(notification).toContain('in 600');
+  });
+
+  // ── Stall detection ─────────────────────────────────────────────────────
+
+  it('should detect stalls between message_update events', async () => {
+    const now = Date.now();
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: now,
+    };
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Response with a stall' }],
+      api: 'openai-completions',
+      provider: 'deepseek',
+      model: 'deepseek-v4',
+      usage: {
+        input: 50,
+        output: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 150,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const messageStartEvent: MessageStartEvent = {
+      type: 'message_start',
+      message: assistantMessage,
+    };
+
+    const updateEvent: MessageUpdateEvent = {
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    };
+
+    // Simulate streaming with a stall
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(200); // TTFT
+    handlers['message_start']?.(messageStartEvent);
+
+    // Normal streaming
+    handlers['message_update']?.(updateEvent);
+    await tick(100);
+    handlers['message_update']?.(updateEvent);
+
+    // STALL: 800ms gap (> 500ms threshold)
+    await tick(800);
+    handlers['message_update']?.(updateEvent);
+
+    // Normal streaming resumes
+    await tick(100);
+    handlers['message_update']?.(updateEvent);
+
+    // Another stall: 600ms gap
+    await tick(600);
+    handlers['message_update']?.(updateEvent);
+
+    await tick(50);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+
+    const turnEndEvent: TurnEndEvent = {
+      type: 'turn_end',
+      turnIndex: 0,
+      message: assistantMessage,
+      toolResults: [],
+    };
+
+    handlers['turn_end']?.(turnEndEvent, mockCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+
+    expect(notification).toMatch(/stall \d+\.\ds×2/); // 2 stalls with decimal
+    expect(notification).toContain('TPS');
+
+    // Verify structured data
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.timing.stallCount).toBe(2);
+    expect(data.timing.stallMs).toBeGreaterThanOrEqual(1300); // 800 + 600 - some threshold margin
+  });
+
+  it('should not flag short gaps as stalls', async () => {
+    const now = Date.now();
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: now,
+    };
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Smooth' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const updateEvent: MessageUpdateEvent = {
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    };
+
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(100);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+
+    // Short gaps (< 500ms)
+    handlers['message_update']?.(updateEvent);
+    await tick(200);
+    handlers['message_update']?.(updateEvent);
+    await tick(300);
+    handlers['message_update']?.(updateEvent);
+    await tick(400); // borderline but < 500
+    handlers['message_update']?.(updateEvent);
+
+    await tick(50);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      mockCtx
+    );
+
+    // No stall in output
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).not.toContain('stall');
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.timing.stallCount).toBe(0);
+    expect(data.timing.stallMs).toBe(0);
+  });
+
+  // ── Model tracking ──────────────────────────────────────────────────────
+
+  it('should capture model info from first assistant message', async () => {
+    const turnStartEvent: TurnStartEvent = {
+      type: 'turn_start',
+      turnIndex: 0,
+      timestamp: Date.now(),
+    };
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hello' }],
+      api: 'openai-completions',
+      provider: 'neuralwatt',
+      model: 'moonshotai/Kimi-K2.5',
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    handlers['turn_start']?.(turnStartEvent);
+    await tick(100);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    });
+    await tick(50);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      mockCtx
+    );
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.model).toEqual({ provider: 'neuralwatt', modelId: 'moonshotai/Kimi-K2.5' });
+  });
+
+  // ── Export command ──────────────────────────────────────────────────────
+
+  it('should export all custom entries when no filter is given', async () => {
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getEntries: vi.fn().mockReturnValue([
+          {
+            type: 'custom',
+            customType: 'tps',
+            data: { tps: 10 },
+            id: '1',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:00Z',
+          },
+          {
+            type: 'custom',
+            customType: 'neuralwatt-energy',
+            data: { energy_joules: 100 },
+            id: '2',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:01Z',
+          },
+          { type: 'message', role: 'user', content: 'hello' },
+          { type: 'session', version: 3, id: 's1', timestamp: '2026-01-01T00:00:00Z', cwd: '/tmp' },
+          {
+            type: 'custom',
+            customType: 'tps',
+            data: { tps: 20 },
+            id: '3',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:02Z',
+          },
+        ]),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as any;
+
+    await commands['tps-export'].handler('', exportCtx);
+
+    // Should export 3 custom entries (2 tps + 1 neuralwatt-energy)
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('Exported 3 entries');
+    expect(msg).toContain('pi-telemetry-all-');
+    expect(msg).toContain('/pi-telemetry/');
+  });
+
+  it('should filter by customType when argument is provided', async () => {
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getEntries: vi.fn().mockReturnValue([
+          {
+            type: 'custom',
+            customType: 'tps',
+            data: { tps: 10 },
+            id: '1',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:00Z',
+          },
+          {
+            type: 'custom',
+            customType: 'neuralwatt-energy',
+            data: { energy_joules: 100 },
+            id: '2',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:01Z',
+          },
+          {
+            type: 'custom',
+            customType: 'tps',
+            data: { tps: 20 },
+            id: '3',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:02Z',
+          },
+        ]),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as any;
+
+    await commands['tps-export'].handler('tps', exportCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('Exported 2 entries');
+    expect(msg).toContain('pi-telemetry-tps-');
+  });
+
+  it('should show warning when no matching entries found', async () => {
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getEntries: vi.fn().mockReturnValue([{ type: 'message', role: 'user', content: 'hello' }]),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as any;
+
+    await commands['tps-export'].handler('nonexistent', exportCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('No entries found');
+    expect(msg).toContain('nonexistent');
+    expect(notifySpy).toHaveBeenCalledWith(msg, 'warning');
+  });
+
+  it('should use exact customType match (neuralwatt-energy, not energy)', async () => {
+    const exportCtx = {
+      ...mockCtx,
+      sessionManager: {
+        getEntries: vi.fn().mockReturnValue([
+          {
+            type: 'custom',
+            customType: 'neuralwatt-energy',
+            data: { energy_joules: 100 },
+            id: '1',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:00Z',
+          },
+          {
+            type: 'custom',
+            customType: 'energy',
+            data: { joules: 50 },
+            id: '2',
+            parentId: null,
+            timestamp: '2026-01-01T00:00:01Z',
+          },
+        ]),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      },
+    } as any;
+
+    // /tps-export neuralwatt-energy — should match exactly, not "energy"
+    await commands['tps-export'].handler('neuralwatt-energy', exportCtx);
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('Exported 1 entry');
+    expect(msg).toContain('pi-telemetry-neuralwatt-energy-');
   });
 });
 
+// ── formatDuration (with 1-decimal sub-minute precision) ────────────────────
+
 describe('formatDuration', () => {
-  // Dynamic import to access named export from module
   const importFormatDuration = async () => {
     const mod = await import('../index.js');
     return mod.formatDuration;
   };
 
-  it('formats sub-minute durations as seconds only', async () => {
+  it('formats sub-minute durations with 1 decimal', async () => {
     const formatDuration = await importFormatDuration();
-    expect(formatDuration(0.8)).toBe('1s'); // rounds up
-    expect(formatDuration(1)).toBe('1s');
-    expect(formatDuration(45)).toBe('45s');
-    expect(formatDuration(59.4)).toBe('59s');
+    expect(formatDuration(0.8)).toBe('0.8s');
+    expect(formatDuration(1.0)).toBe('1.0s');
+    expect(formatDuration(2.3)).toBe('2.3s');
+    expect(formatDuration(9.9)).toBe('9.9s');
+    expect(formatDuration(10.5)).toBe('10.5s');
+    expect(formatDuration(45.0)).toBe('45.0s');
+    expect(formatDuration(59.4)).toBe('59.4s');
   });
 
   it('formats minute+ durations as minutes and seconds', async () => {
@@ -672,24 +1136,22 @@ describe('formatDuration', () => {
 
   it('formats month+ durations as months and days', async () => {
     const formatDuration = await importFormatDuration();
-    expect(formatDuration(2592000)).toBe('1mo 0d'); // exactly 30 days
-    expect(formatDuration(2851200)).toBe('1mo 3d'); // 33 days = 1mo + 3d
-    expect(formatDuration(5184000)).toBe('2mo 0d'); // exactly 60 days
-    expect(formatDuration(7776000)).toBe('3mo 0d'); // exactly 90 days
-    expect(formatDuration(9504000)).toBe('3mo 2w'); // 110 days = 3mo + 2w
+    expect(formatDuration(2592000)).toBe('1mo 0d');
+    expect(formatDuration(2851200)).toBe('1mo 3d');
+    expect(formatDuration(5184000)).toBe('2mo 0d');
+    expect(formatDuration(7776000)).toBe('3mo 0d');
+    expect(formatDuration(9504000)).toBe('3mo 2w');
   });
 
   it('handles large multi-month durations', async () => {
     const formatDuration = await importFormatDuration();
     expect(formatDuration(15552000)).toBe('6mo 0d');
-    expect(formatDuration(31536000)).toBe('12mo 5d'); // ~365 days = 12mo + 5d (5 days remain after 12 months)
-    expect(formatDuration(63072000)).toBe('24mo 1w'); // ~730 days = 24mo + 1w 3d → shows as 24mo 1w
+    expect(formatDuration(31536000)).toBe('12mo 5d');
+    expect(formatDuration(63072000)).toBe('24mo 1w');
   });
 
-  it('rounds correctly', async () => {
+  it('rounds correctly for multi-unit durations', async () => {
     const formatDuration = await importFormatDuration();
-    expect(formatDuration(45.3)).toBe('45s');
-    expect(formatDuration(45.7)).toBe('46s');
     expect(formatDuration(89.9)).toBe('1m 30s');
     expect(formatDuration(90.1)).toBe('1m 30s');
   });

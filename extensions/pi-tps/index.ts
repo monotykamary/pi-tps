@@ -1,26 +1,54 @@
 /**
  * pi-tps — Tokens-per-second tracker for pi
  *
- * Tracks LLM generation speed (tokens/second) after every agent turn,
- * shows TTFT (time to first token) and TPS metrics, and restores
- * notifications on session resume.
+ * Captures structured telemetry at every LLM turn (per-API-call).
+ * Tracks real-time TPS via token-by-token updates, detects inference
+ * stalls (GPU queuing / request queuing pauses), and persists telemetry
+ * as custom entries in the session JSONL for provider debugging.
  *
  * Originally from: https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts
  */
 
-import type { AssistantMessage } from '@mariozechner/pi-ai';
-import type { ExtensionAPI, AgentEndEvent, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import { writeFileSync, mkdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
-// Event types not exported from main package - define locally
+import type { AssistantMessage } from '@mariozechner/pi-ai';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from '@mariozechner/pi-coding-agent';
+
+// ─── Event types not exported from main package ──────────────────────────────
+
 interface TurnStartEvent {
   type: 'turn_start';
   turnIndex: number;
   timestamp: number;
 }
 
+interface TurnEndEvent {
+  type: 'turn_end';
+  turnIndex: number;
+  message: unknown;
+  toolResults: unknown[];
+}
+
 interface MessageStartEvent {
   type: 'message_start';
   message: unknown;
+}
+
+interface MessageUpdateEvent {
+  type: 'message_update';
+  message: unknown;
+  assistantMessageEvent: {
+    type: string;
+    delta?: string;
+    partial?: unknown;
+    [key: string]: unknown;
+  };
 }
 
 interface MessageEndEvent {
@@ -34,19 +62,50 @@ interface SessionTreeEvent {
   oldLeafId: string | null;
 }
 
-interface TPSData {
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/** Minimum gap between token updates to count as a stall (ms) */
+const STALL_THRESHOLD_MS = 500;
+
+// ─── Data types ─────────────────────────────────────────────────────────────
+
+/** Structured telemetry persisted per turn in the session JSONL */
+interface TurnTelemetry {
+  model: { provider: string; modelId: string };
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  timing: {
+    ttftMs: number | null; // time to first token
+    totalMs: number; // wall clock: turn_start → turn_end
+    generationMs: number; // actual streaming time (excludes stalls)
+    stallMs: number; // accumulated gaps > STALL_THRESHOLD_MS
+    stallCount: number; // how many discrete stall events
+    messageCount: number; // assistant messages in this turn
+  };
+  tps: number | null; // output / (generationMs / 1000)
+  timestamp: number;
+}
+
+/** Legacy format (for backward-compatible rehydration) */
+interface LegacyTPSData {
   message: string;
   timestamp: number;
 }
 
+/** In-memory state accumulated during one LLM turn */
 interface TurnTiming {
   turnStartMs: number;
+  lastUpdateMs: number;
   firstTokenMs: number | null;
-  lastTokenMs: number | null;
-  assistantMessages: AssistantMessage[]; // Messages generated in THIS turn only
-  totalGenerationMs: number; // Accumulated streaming time (excludes gaps)
-  currentMessageStartMs: number | null; // When the current message started streaming
+  currentMessageStartMs: number | null;
+  assistantMessages: AssistantMessage[];
+  totalGenerationMs: number;
+  stallMs: number;
+  stallCount: number;
+  inStall: boolean;
+  messageCount: number;
 }
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
   if (!message || typeof message !== 'object') return false;
@@ -60,12 +119,13 @@ function formatNumber(num: number): string {
 
 /**
  * Format duration in seconds to human-readable string.
+ * Sub-minute values show 1 decimal (e.g. "2.3s" for TTFT precision).
  * Rules: no decimals, up to 2 units, includes weeks.
  * Exported for testing.
  */
 export function formatDuration(totalSeconds: number): string {
   if (totalSeconds < 60) {
-    return `${Math.round(totalSeconds)}s`;
+    return `${totalSeconds.toFixed(1)}s`;
   }
 
   const seconds = Math.round(totalSeconds);
@@ -112,14 +172,36 @@ export function formatDuration(totalSeconds: number): string {
   return top2.map((p) => `${p.value}${p.label}`).join(' ');
 }
 
-function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null {
-  // Aggregate token usage ONLY from assistant messages generated in this turn
-  // (not all messages from the session history)
+/**
+ * Compose the human-readable display string from structured telemetry.
+ */
+function composeDisplayString(t: TurnTelemetry): string {
+  const parts: string[] = [];
+  if (t.tps !== null) parts.push(`TPS ${t.tps.toFixed(1)} tok/s`);
+  if (t.timing.ttftMs !== null) {
+    parts.push(`TTFT ${formatDuration(t.timing.ttftMs / 1000)}`);
+  }
+  parts.push(formatDuration(t.timing.totalMs / 1000));
+  parts.push(`out ${formatNumber(t.tokens.output)}`);
+  parts.push(`in ${formatNumber(t.tokens.input)}`);
+  if (t.timing.stallMs > 0) {
+    const stallStr = formatDuration(t.timing.stallMs / 1000);
+    parts.push(`stall ${stallStr}×${t.timing.stallCount}`);
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * Build structured TurnTelemetry from accumulated turn timing.
+ * Returns null if the turn had no meaningful LLM output.
+ */
+function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
   let input = 0;
   let output = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
   let totalTokens = 0;
+  let model: { provider: string; modelId: string } | null = null;
 
   for (const message of timing.assistantMessages) {
     input += message.usage.input || 0;
@@ -127,74 +209,112 @@ function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null
     cacheRead += message.usage.cacheRead || 0;
     cacheWrite += message.usage.cacheWrite || 0;
     totalTokens += message.usage.totalTokens || 0;
+    if (!model && message.provider && message.model) {
+      model = { provider: message.provider, modelId: message.model };
+    }
   }
 
   if (output <= 0) return null;
-  if (!timing.firstTokenMs || !timing.lastTokenMs) return null;
-
-  const ttftMs = timing.firstTokenMs - timing.turnStartMs;
-  const totalMs = timing.lastTokenMs - timing.turnStartMs;
-
-  // True generation TPS: only counts actual streaming time (excludes TTFT and tool gaps)
+  if (!timing.firstTokenMs) return null;
   if (timing.totalGenerationMs <= 0) return null;
 
-  const generationSeconds = timing.totalGenerationMs / 1000;
-  const tps = output / generationSeconds;
+  const totalMs = Date.now() - timing.turnStartMs;
+  const tps = output / (timing.totalGenerationMs / 1000);
 
-  const ttftFormatted = formatDuration(ttftMs / 1000);
-  const totalFormatted = formatDuration(totalMs / 1000);
-
-  return `TPS ${tps.toFixed(1)} tok/s · TTFT ${ttftFormatted} · ${totalFormatted} · out ${formatNumber(output)} · in ${formatNumber(input)}`;
+  return {
+    model: model!,
+    tokens: { input, output, cacheRead, cacheWrite, total: totalTokens },
+    timing: {
+      ttftMs: timing.firstTokenMs - timing.turnStartMs,
+      totalMs,
+      generationMs: timing.totalGenerationMs,
+      stallMs: timing.stallMs,
+      stallCount: timing.stallCount,
+      messageCount: timing.messageCount,
+    },
+    tps: Math.round(tps * 10) / 10,
+    timestamp: Date.now(),
+  };
 }
+
+/**
+ * Detect if data is legacy format (has .message string) vs new structured format.
+ */
+function isLegacyData(data: unknown): data is LegacyTPSData {
+  return (
+    typeof data === 'object' && data !== null && typeof (data as LegacyTPSData).message === 'string'
+  );
+}
+
+// ─── Extension ──────────────────────────────────────────────────────────────
 
 export default function tpsExtension(pi: ExtensionAPI) {
   // Current turn timing state
   let currentTiming: TurnTiming | null = null;
-  // Track if we've seen any assistant messages in this turn
-  let hasSeenAssistantMessage = false;
 
-  // Shared rehydration logic: restore the most recent TPS notification.
-  // Deferred via setTimeout so it survives the TUI clear+rebuild that
-  // interactive mode performs immediately after session_tree / session_start.
+  // Cached session entries for argument completion (captured on session_start / session_tree)
+  let cachedEntries: Array<{ type?: string; customType?: string }> = [];
+
+  // ── Rehydration ─────────────────────────────────────────────────────────
+
+  /**
+   * Restore the most recent TPS notification from session entries.
+   * Handles both legacy (data.message string) and new (structured) formats.
+   * Deferred via setTimeout so it survives TUI clear+rebuild.
+   */
   function restoreTPSNotification(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
-        const data = entry.data as TPSData;
-        if (data?.message) {
-          setTimeout(() => {
-            ctx.ui.notify(data.message, 'info');
-          }, 0);
+        const data = entry.data as unknown;
+        if (!data) break;
+        let message: string;
+        if (isLegacyData(data)) {
+          // Backward compatibility: legacy format with pre-built message string
+          message = data.message;
+        } else {
+          // New structured format: compose display at runtime
+          message = composeDisplayString(data as TurnTelemetry);
         }
+        setTimeout(() => {
+          ctx.ui.notify(message, 'info');
+        }, 0);
         break;
       }
     }
   }
 
   // Restore notification on session start/resume — skip only brand-new sessions
-  pi.on('session_start', (event, ctx) => {
-    if (event.reason === 'new') return;
+  pi.on('session_start', (_event, ctx) => {
+    // Restore for all reasons including startup/reload (they may continue a previous session)
+    cachedEntries = ctx.sessionManager.getEntries();
     restoreTPSNotification(ctx);
   });
 
   // Restore notification after /tree navigation (same session, different branch)
   pi.on('session_tree', (_event: SessionTreeEvent, ctx: ExtensionContext) => {
+    cachedEntries = ctx.sessionManager.getEntries();
     restoreTPSNotification(ctx);
   });
+
+  // ── Turn timing ─────────────────────────────────────────────────────────
 
   // Track when a turn starts (request sent to LLM)
   pi.on('turn_start', (event: TurnStartEvent) => {
     currentTiming = {
       turnStartMs: event.timestamp,
+      lastUpdateMs: event.timestamp,
       firstTokenMs: null,
-      lastTokenMs: null,
+      currentMessageStartMs: null,
       assistantMessages: [],
       totalGenerationMs: 0,
-      currentMessageStartMs: null,
+      stallMs: 0,
+      stallCount: 0,
+      inStall: false,
+      messageCount: 0,
     };
-    hasSeenAssistantMessage = false;
   });
 
   // Track when a message starts (first token received)
@@ -205,13 +325,41 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const now = Date.now();
 
     // Only capture TTFT for the first assistant message
-    if (!hasSeenAssistantMessage) {
+    if (currentTiming.firstTokenMs === null) {
       currentTiming.firstTokenMs = now;
-      hasSeenAssistantMessage = true;
     }
 
     // Track when THIS message started streaming (for generation TPS)
     currentTiming.currentMessageStartMs = now;
+
+    // Update last update time for stall tracking
+    currentTiming.lastUpdateMs = now;
+    currentTiming.messageCount++;
+
+    // End any active stall (a message starting means we're not stalled)
+    currentTiming.inStall = false;
+  });
+
+  // Track token-by-token updates during streaming (real-time TPS & stall detection)
+  pi.on('message_update', (event: MessageUpdateEvent) => {
+    if (!currentTiming) return;
+    if (!isAssistantMessage(event.message)) return;
+
+    const now = Date.now();
+    const gap = now - currentTiming.lastUpdateMs;
+
+    // Detect stall: gap between consecutive updates exceeds threshold
+    if (gap >= STALL_THRESHOLD_MS) {
+      if (!currentTiming.inStall) {
+        currentTiming.stallCount++;
+      }
+      currentTiming.inStall = true;
+      currentTiming.stallMs += gap;
+    } else {
+      currentTiming.inStall = false;
+    }
+
+    currentTiming.lastUpdateMs = now;
   });
 
   // Track when a message ends
@@ -221,36 +369,85 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
     const now = Date.now();
 
-    // Update last token time for the overall turn
-    currentTiming.lastTokenMs = now;
-
     // Accumulate ACTUAL streaming time for this message (true generation time)
     if (currentTiming.currentMessageStartMs) {
       const messageGenerationMs = now - currentTiming.currentMessageStartMs;
       currentTiming.totalGenerationMs += messageGenerationMs;
-      currentTiming.currentMessageStartMs = null; // Reset for next message
+      currentTiming.currentMessageStartMs = null;
     }
 
     // Store this message to count its tokens later (only current turn's messages)
     currentTiming.assistantMessages.push(event.message as AssistantMessage);
+    currentTiming.lastUpdateMs = now;
   });
 
-  // Calculate and display stats when agent loop ends
-  pi.on('agent_end', (event: AgentEndEvent, ctx: ExtensionContext) => {
+  // ── Persist telemetry ───────────────────────────────────────────────────
+
+  // Calculate, display, and persist telemetry at the end of each LLM turn
+  pi.on('turn_end', (_event: TurnEndEvent, ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
     if (!currentTiming) return;
 
     const timing = currentTiming;
     currentTiming = null;
-    hasSeenAssistantMessage = false;
 
-    const message = calculateStats(event, timing);
-    if (!message) return;
+    const telemetry = buildTelemetry(timing);
+    if (!telemetry) return;
 
-    // Show notification immediately
+    // Show notification immediately (composed from structured data)
+    const message = composeDisplayString(telemetry);
     ctx.ui.notify(message, 'info');
 
-    // Save to session for restoration on resume
-    pi.appendEntry('tps', { message, timestamp: Date.now() });
+    // Persist structured telemetry to session for export and rehydration
+    pi.appendEntry('tps', telemetry);
+  });
+
+  // ── Export command ──────────────────────────────────────────────────────
+
+  pi.registerCommand('tps-export', {
+    description: 'Export telemetry from the current session as JSONL',
+    getArgumentCompletions: (argumentPrefix: string) => {
+      // Collect all unique customType values from cached session entries
+      const customTypes = new Set<string>();
+      for (const entry of cachedEntries) {
+        if (entry.type === 'custom' && entry.customType) {
+          customTypes.add(entry.customType);
+        }
+      }
+      return Array.from(customTypes)
+        .filter((ct) => ct.startsWith(argumentPrefix))
+        .map((ct) => ({ value: ct, label: ct }));
+    },
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const filterType = args.trim() || null;
+
+      // Collect all custom entries, optionally filtered by customType
+      const entries = ctx.sessionManager.getEntries();
+      const customEntries = entries.filter(
+        (e) => e.type === 'custom' && (!filterType || e.customType === filterType)
+      );
+
+      if (customEntries.length === 0) {
+        const scope = filterType ? `customType:"${filterType}"` : 'any custom type';
+        ctx.ui.notify(`No entries found for ${scope}`, 'warning');
+        return;
+      }
+
+      // Write to tmp directory
+      const dir = join(tmpdir(), 'pi-telemetry');
+      mkdirSync(dir, { recursive: true });
+
+      const sessionId = ctx.sessionManager.getSessionId?.() ?? 'unknown';
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const scope = filterType ?? 'all';
+      const filename = `pi-telemetry-${scope}-${sessionId.slice(0, 8)}-${timestamp}.jsonl`;
+      const filepath = join(dir, filename);
+
+      const content = customEntries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+      writeFileSync(filepath, content);
+
+      const entryWord = customEntries.length === 1 ? 'entry' : 'entries';
+      ctx.ui.notify(`Exported ${customEntries.length} ${entryWord} → ${filepath}`, 'info');
+    },
   });
 }
