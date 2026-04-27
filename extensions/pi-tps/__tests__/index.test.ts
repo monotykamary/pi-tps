@@ -238,24 +238,45 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledWith(msg, 'info');
   });
 
-  it('should restore notification from legacy format (backward compat)', async () => {
-    mockEntries.push({
-      type: 'custom',
-      customType: 'tps',
-      data: {
-        message: 'TPS 42.0 tok/s · TTFT 1.2s · 5.0s · out 100 · in 50',
-        timestamp: Date.now(),
+  it('should ignore legacy entries and only rehydrate structured telemetry', async () => {
+    mockEntries.push(
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: {
+          message: 'TPS 37.9 tok/s · TTFT 1s · 27s · out 998 · in 917',
+          timestamp: Date.now() - 500,
+        },
       },
-    });
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: {
+          model: { provider: 'openai', modelId: 'gpt-4' },
+          tokens: { input: 273, output: 51, cacheRead: 0, cacheWrite: 0, total: 324 },
+          timing: {
+            ttftMs: 1000,
+            totalMs: 3800,
+            generationMs: 2400,
+            stallMs: 1400,
+            stallCount: 1,
+            messageCount: 1,
+          },
+          tps: 18.0,
+          timestamp: Date.now(),
+        },
+      }
+    );
 
     handlers['session_start']?.({ reason: 'resume' }, mockCtx);
-    await tick(); // deferred via setTimeout(0)
+    await tick();
 
     expect(notifySpy).toHaveBeenCalledOnce();
-    expect(notifySpy).toHaveBeenCalledWith(
-      'TPS 42.0 tok/s · TTFT 1.2s · 5.0s · out 100 · in 50',
-      'info'
-    );
+    const msg = notifySpy.mock.calls[0][0];
+    expect(msg).toContain('TPS 18.0');
+    expect(msg).toContain('TTFT 1.0s');
+    expect(msg).toContain('stall 1.4s×1');
+    expect(msg).not.toContain('TPS 37.9');
   });
 
   it('should restore notification on session startup (continuing previous session)', async () => {
@@ -337,13 +358,18 @@ describe('pi-tps extension', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
   });
 
-  it('should restore all TPS entries on resume (not just the most recent)', async () => {
+  it('should rehydrate most recent structured entry, skipping legacy entries', async () => {
     mockEntries.push(
       {
         type: 'custom',
         customType: 'tps',
+        data: { message: 'legacy 1', timestamp: Date.now() - 3000 },
+      },
+      {
+        type: 'custom',
+        customType: 'tps',
         data: {
-          model: { provider: 'old', modelId: 'old-model' },
+          model: { provider: 'a', modelId: 'a-1' },
           tokens: { input: 5, output: 10, cacheRead: 0, cacheWrite: 0, total: 15 },
           timing: {
             ttftMs: 5000,
@@ -354,14 +380,19 @@ describe('pi-tps extension', () => {
             messageCount: 1,
           },
           tps: 1.2,
-          timestamp: Date.now() - 1000,
+          timestamp: Date.now() - 2000,
         },
       },
       {
         type: 'custom',
         customType: 'tps',
+        data: { message: 'legacy 2', timestamp: Date.now() - 1000 },
+      },
+      {
+        type: 'custom',
+        customType: 'tps',
         data: {
-          model: { provider: 'recent', modelId: 'recent-model' },
+          model: { provider: 'b', modelId: 'b-1' },
           tokens: { input: 50, output: 500, cacheRead: 0, cacheWrite: 0, total: 550 },
           timing: {
             ttftMs: 2000,
@@ -378,15 +409,13 @@ describe('pi-tps extension', () => {
     );
 
     handlers['session_start']?.({ reason: 'resume' }, mockCtx);
-    await tick(60); // wait for staggered timeouts (0ms + 50ms)
+    await tick();
 
-    // Both entries should be shown (recent first since iteration is backwards)
-    expect(notifySpy).toHaveBeenCalledTimes(2);
-    const firstMsg = notifySpy.mock.calls[0][0];
-    const secondMsg = notifySpy.mock.calls[1][0];
-    expect(firstMsg).toContain('TPS 83.3');
-    expect(firstMsg).toContain('stall');
-    expect(secondMsg).toContain('TPS 1.2');
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0];
+    expect(msg).toContain('TPS 83.3');
+    expect(msg).toContain('stall');
+    expect(msg).not.toContain('legacy');
   });
 
   // ── Token aggregation across multiple messages per turn ──────────────────

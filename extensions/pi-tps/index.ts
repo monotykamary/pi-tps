@@ -258,32 +258,26 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // ── Rehydration ─────────────────────────────────────────────────────────
 
   /**
-   * Restore all TPS notifications from session entries on resume.
-   * Handles both legacy (data.message string) and new (structured) formats.
-   * Notifications are staggered (50ms apart) because showStatus replaces
-   * in place if the previous status is still visible.
+   * Restore the most recent structured TPS notification on resume.
+   * Legacy entries (data.message string) are ignored — only the new
+   * TurnTelemetry format is rehydrated.
+   * Deferred via setTimeout so it survives TUI clear+rebuild.
    */
-  function restoreTPSNotifications(ctx: ExtensionContext) {
+  function restoreTPSNotification(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
     const entries = ctx.sessionManager.getEntries();
-    let stagger = 0;
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
         const data = entry.data as unknown;
         if (!data) continue;
-        let message: string;
-        if (isLegacyData(data)) {
-          // Backward compatibility: legacy format with pre-built message string
-          message = data.message;
-        } else {
-          // New structured format: compose display at runtime
-          message = composeDisplayString(data as TurnTelemetry);
-        }
+        // Skip legacy entries — only rehydrate structured TurnTelemetry
+        if (isLegacyData(data)) continue;
+        const message = composeDisplayString(data as TurnTelemetry);
         setTimeout(() => {
           ctx.ui.notify(message, 'info');
-        }, stagger);
-        stagger += 50;
+        }, 0);
+        break;
       }
     }
   }
@@ -292,13 +286,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => {
     // Restore for all reasons including startup/reload (they may continue a previous session)
     cachedEntries = ctx.sessionManager.getEntries();
-    restoreTPSNotifications(ctx);
+    restoreTPSNotification(ctx);
   });
 
   // Restore notification after /tree navigation (same session, different branch)
   pi.on('session_tree', (_event: SessionTreeEvent, ctx: ExtensionContext) => {
     cachedEntries = ctx.sessionManager.getEntries();
-    restoreTPSNotifications(ctx);
+    restoreTPSNotification(ctx);
   });
 
   // ── Turn timing ─────────────────────────────────────────────────────────
