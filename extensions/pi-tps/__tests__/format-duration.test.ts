@@ -61,11 +61,18 @@ describe('formatDuration', () => {
     expect(formatDuration(9504000)).toBe('3mo 2w');
   });
 
-  it('handles large multi-month durations', async () => {
+  it('formats year+ durations as years and days', async () => {
+    const formatDuration = await importFormatDuration();
+    expect(formatDuration(31536000)).toBe('1y 0d');
+    expect(formatDuration(31622400)).toBe('1y 1d');
+    expect(formatDuration(34128000)).toBe('1y 1mo');
+    expect(formatDuration(63072000)).toBe('2y 0d');
+  });
+
+  it('handles large multi-year durations', async () => {
     const formatDuration = await importFormatDuration();
     expect(formatDuration(15552000)).toBe('6mo 0d');
-    expect(formatDuration(31536000)).toBe('12mo 5d');
-    expect(formatDuration(63072000)).toBe('24mo 1w');
+    expect(formatDuration(315360000)).toBe('10y 0d');
   });
 
   it('rounds correctly for multi-unit durations', async () => {

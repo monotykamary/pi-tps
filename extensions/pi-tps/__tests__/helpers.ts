@@ -1,9 +1,5 @@
 import { vi } from 'vitest';
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
-} from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import type { AssistantMessage } from '@mariozechner/pi-ai';
 
 // ─── Event types (mirrors extension/index.ts — not exported from pi's public API) ────

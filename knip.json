@@ -1,10 +1,9 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "ignore": ["**/__tests__/helpers.ts"],
   "ignoreExportsUsedInFile": true,
   "workspaces": {
     ".": {
-      "entry": ["extensions/*/index.ts"],
+      "entry": ["extensions/*/index.ts", "extensions/**/__tests__/**/*.test.ts"],
       "project": ["extensions/**/*.ts"]
     }
   }

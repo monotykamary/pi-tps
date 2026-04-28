@@ -24,16 +24,25 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
     messageStart: number;
     firstUpdate: number;
     messageEnd: number;
+    turnEnd?: number;
   }) {
     const { handlers, notifySpy, appendEntrySpy } = fixture;
-    const callLog: number[] = [];
+
+    // Explicit sequence of performance.now() return values in call order:
+    // turnStartMs, lastUpdateMs (both at turn start), message_start,
+    // first message_update, message_end, turnEndMs
+    const timestamps = [
+      clocks.turnStart, // turnStartMs
+      clocks.turnStart, // lastUpdateMs (same moment as turn start)
+      clocks.messageStart, // message_start: currentMessageStartMs + lastUpdateMs reset
+      clocks.firstUpdate, // message_update: firstTokenMs
+      clocks.messageEnd, // message_end: generation time end
+      clocks.turnEnd ?? clocks.messageEnd, // turnEndMs
+    ];
+
+    let callIdx = 0;
     const spy = vi.spyOn(performance, 'now').mockImplementation(() => {
-      const next =
-        callLog.length < Object.values(clocks).length
-          ? Object.values(clocks)[callLog.length]
-          : clocks.messageEnd;
-      callLog.push(next);
-      return next;
+      return timestamps[Math.min(callIdx++, timestamps.length - 1)];
     });
 
     const assistantMessage: AssistantMessage = {
@@ -123,7 +132,7 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
   it('should use performance.now() consistently across all timing events', () => {
     const { handlers, appendEntrySpy } = fixture;
     const spy = vi.spyOn(performance, 'now');
-    const timestamps = [0, 100, 100.001, 101.234];
+    const timestamps = [0, 0, 100, 100.001, 101.234, 101.234];
     let callIdx = 0;
     spy.mockImplementation(() => timestamps[Math.min(callIdx++, timestamps.length - 1)]);
 

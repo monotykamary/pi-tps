@@ -10,7 +10,7 @@
  */
 
 import { writeFileSync, mkdirSync } from 'fs';
-import { tmpdir } from 'os';
+import { homedir } from 'os';
 import { join } from 'path';
 
 import type { AssistantMessage } from '@mariozechner/pi-ai';
@@ -109,8 +109,10 @@ function isAssistantMessage(message: unknown): message is AssistantMessage {
   if (!message || typeof message !== 'object') return false;
   const msg = message as Record<string, unknown>;
   if (msg.role !== 'assistant') return false;
-  // Guard: ensure usage exists before downstream code accesses it.
+  // Guard: ensure usage exists with required numeric fields before downstream access.
   if (typeof msg.usage !== 'object' || msg.usage === null) return false;
+  const usage = msg.usage as Record<string, unknown>;
+  if (typeof usage.input !== 'number' || typeof usage.output !== 'number') return false;
   return true;
 }
 
@@ -121,8 +123,8 @@ function formatNumber(num: number): string {
 /**
  * Format duration in seconds to human-readable string.
  * Sub-minute values show 1 decimal (e.g. "2.3s" for TTFT precision).
- * Rules: no decimals, up to 2 units, includes weeks.
- * Exported for testing.
+ * Rules: no decimals, up to 2 units, includes years.
+ * @internal Exported for testing only.
  */
 export function formatDuration(totalSeconds: number): string {
   if (totalSeconds < 60) {
@@ -131,6 +133,7 @@ export function formatDuration(totalSeconds: number): string {
 
   const seconds = Math.round(totalSeconds);
   const units = [
+    { label: 'y', seconds: 365 * 24 * 60 * 60 }, // 365 days
     { label: 'mo', seconds: 30 * 24 * 60 * 60 }, // 30 days
     { label: 'w', seconds: 7 * 24 * 60 * 60 },
     { label: 'd', seconds: 24 * 60 * 60 },
@@ -158,9 +161,12 @@ export function formatDuration(totalSeconds: number): string {
     const firstUnitIndex = units.findIndex((u) => u.label === parts[0].label);
     if (firstUnitIndex < units.length - 1) {
       let nextIndex = firstUnitIndex + 1;
-      // Skip weeks when showing months - go directly to days
+      // Skip weeks when showing months, skip months+weeks when showing years —
+      // go directly to days for a cleaner display
       if (parts[0].label === 'mo' && units[nextIndex].label === 'w') {
         nextIndex++;
+      } else if (parts[0].label === 'y' && units[nextIndex].label === 'mo') {
+        nextIndex += 2; // skip mo and w, land on d
       }
       if (nextIndex < units.length) {
         parts.push({ value: 0, label: units[nextIndex].label });
@@ -196,7 +202,7 @@ function composeDisplayString(t: TurnTelemetry): string {
  * Build structured TurnTelemetry from accumulated turn timing.
  * Returns null if the turn had no meaningful LLM output.
  */
-function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
+function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | null {
   let input = 0;
   let output = 0;
   let cacheRead = 0;
@@ -234,7 +240,7 @@ function buildTelemetry(timing: TurnTiming): TurnTelemetry | null {
   if (timing.totalGenerationMs <= 0) return null;
   if (!model) return null;
 
-  const totalMs = performance.now() - timing.turnStartMs;
+  const totalMs = turnEndMs - timing.turnStartMs;
   const tps = output / (timing.totalGenerationMs / 1000);
 
   return {
@@ -312,10 +318,10 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // ── Turn timing ─────────────────────────────────────────────────────────
 
   // Track when a turn starts (request sent to LLM)
-  pi.on('turn_start', (event: TurnStartEvent) => {
+  pi.on('turn_start', (_event: TurnStartEvent) => {
     currentTiming = {
       turnStartMs: performance.now(),
-      lastUpdateMs: event.timestamp,
+      lastUpdateMs: performance.now(),
       firstTokenMs: null,
       currentMessageStartMs: null,
       assistantMessages: [],
@@ -410,7 +416,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const timing = currentTiming;
     currentTiming = null;
 
-    const telemetry = buildTelemetry(timing);
+    const turnEndMs = performance.now();
+    const telemetry = buildTelemetry(timing, turnEndMs);
     if (!telemetry) return;
 
     // Show notification immediately (composed from structured data)
@@ -419,6 +426,9 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
     // Persist structured telemetry to session for export and rehydration
     pi.appendEntry('tps', telemetry);
+
+    // Keep argument completion cache in sync with new entries
+    cachedEntries.push({ type: 'custom', customType: 'tps' });
   });
 
   // ── Export command ──────────────────────────────────────────────────────
@@ -490,7 +500,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
       }));
 
       // Write to tmp directory
-      const dir = join(tmpdir(), 'pi-telemetry');
+      const cacheBase = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
+      const dir = join(cacheBase, 'pi-telemetry');
       mkdirSync(dir, { recursive: true });
 
       const sessionId = ctx.sessionManager.getSessionId?.() ?? 'unknown';
