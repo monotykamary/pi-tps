@@ -85,7 +85,27 @@ describe('pi-tps extension — rehydration', () => {
     expect(notifySpy).toHaveBeenCalledWith(msg, 'info');
   });
 
-  it('should ignore legacy entries and only rehydrate structured telemetry', async () => {
+  it('should rehydrate legacy entries when no structured telemetry exists', async () => {
+    const { handlers, notifySpy, mockEntries } = fixture;
+
+    mockEntries.push({
+      type: 'custom',
+      customType: 'tps',
+      data: {
+        message: 'TPS 37.9 tok/s · TTFT 1s · 27s · out 998 · in 917',
+        timestamp: Date.now() - 500,
+      },
+    });
+
+    handlers['session_start']?.({ reason: 'resume' }, fixture.mockCtx);
+    await tick();
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0];
+    expect(msg).toContain('TPS 37.9');
+  });
+
+  it('should prefer structured telemetry over legacy entries', async () => {
     const { handlers, notifySpy, mockEntries } = fixture;
 
     mockEntries.push(
@@ -94,7 +114,7 @@ describe('pi-tps extension — rehydration', () => {
         customType: 'tps',
         data: {
           message: 'TPS 37.9 tok/s · TTFT 1s · 27s · out 998 · in 917',
-          timestamp: Date.now() - 500,
+          timestamp: Date.now() - 1000,
         },
       },
       makeTpsEntry({
@@ -155,14 +175,17 @@ describe('pi-tps extension — rehydration', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
   });
 
-  it('should rehydrate most recent structured entry, skipping legacy entries', async () => {
+  it('should rehydrate most recent entry, preferring structured over legacy', async () => {
     const { handlers, notifySpy, mockEntries } = fixture;
 
     mockEntries.push(
       {
         type: 'custom',
         customType: 'tps',
-        data: { message: 'legacy 1', timestamp: Date.now() - 3000 },
+        data: {
+          message: 'TPS 10.0 tok/s · TTFT 1s · 5s · out 100 · in 50',
+          timestamp: Date.now() - 3000,
+        },
       },
       makeTpsEntry({
         provider: 'a',
@@ -178,7 +201,10 @@ describe('pi-tps extension — rehydration', () => {
       {
         type: 'custom',
         customType: 'tps',
-        data: { message: 'legacy 2', timestamp: Date.now() - 1000 },
+        data: {
+          message: 'TPS 15.0 tok/s · TTFT 2s · 10s · out 200 · in 100',
+          timestamp: Date.now() - 1000,
+        },
       },
       makeTpsEntry({
         provider: 'b',
@@ -203,6 +229,38 @@ describe('pi-tps extension — rehydration', () => {
     const msg = notifySpy.mock.calls[0][0];
     expect(msg).toContain('TPS 83.3');
     expect(msg).toContain('stall');
-    expect(msg).not.toContain('legacy');
+  });
+
+  it('should rehydrate most recent legacy entry when no structured entry follows', async () => {
+    const { handlers, notifySpy, mockEntries } = fixture;
+
+    mockEntries.push(
+      makeTpsEntry({
+        provider: 'a',
+        modelId: 'a-1',
+        input: 5,
+        output: 10,
+        total: 15,
+        ttftMs: 5000,
+        totalMs: 10000,
+        generationMs: 8000,
+        tps: 1.2,
+      }),
+      {
+        type: 'custom',
+        customType: 'tps',
+        data: {
+          message: 'TPS 37.9 tok/s · TTFT 1s · 27s · out 998 · in 917',
+          timestamp: Date.now() - 1000,
+        },
+      }
+    );
+
+    handlers['session_start']?.({ reason: 'resume' }, fixture.mockCtx);
+    await tick();
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0];
+    expect(msg).toContain('TPS 37.9');
   });
 });

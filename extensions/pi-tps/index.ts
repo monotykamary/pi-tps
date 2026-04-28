@@ -280,9 +280,9 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // ── Rehydration ─────────────────────────────────────────────────────────
 
   /**
-   * Restore the most recent structured TPS notification on resume.
-   * Legacy entries (data.message string) are ignored — only the new
-   * TurnTelemetry format is rehydrated.
+   * Restore the most recent TPS notification on resume.
+   * Supports both structured (TurnTelemetry) and legacy ({ message, timestamp })
+   * entries for backwards compatibility with older session files.
    * Deferred via setTimeout so it survives TUI clear+rebuild.
    */
   function restoreTPSNotification(ctx: ExtensionContext) {
@@ -291,13 +291,23 @@ export default function tpsExtension(pi: ExtensionAPI) {
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
-        const data = entry.data as TurnTelemetry | null;
-        if (!data?.model) continue;
-        const message = composeDisplayString(data);
-        setTimeout(() => {
-          ctx.ui.notify(message, 'info');
-        }, 0);
-        break;
+        const data = entry.data as Record<string, unknown> | null;
+        if (!data) continue;
+        // Structured format (current): has model field
+        if (data.model) {
+          const message = composeDisplayString(data as unknown as TurnTelemetry);
+          setTimeout(() => {
+            ctx.ui.notify(message, 'info');
+          }, 0);
+          break;
+        }
+        // Legacy format: { message: string, timestamp: number }
+        if (typeof data.message === 'string') {
+          setTimeout(() => {
+            ctx.ui.notify(data.message as string, 'info');
+          }, 0);
+          break;
+        }
       }
     }
   }
