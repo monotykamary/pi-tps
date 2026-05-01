@@ -146,8 +146,8 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
-    // TPS should be absent (null) — can't measure rate from a burst
-    expect(notification).not.toMatch(/TPS/);
+    // TPS shown as dash — burst delivery can't produce meaningful rate
+    expect(notification).toContain('TPS —');
 
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.timing.generationMs).toBeGreaterThan(0);

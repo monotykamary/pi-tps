@@ -190,7 +190,7 @@ export function formatDuration(totalSeconds: number): string {
  */
 function composeDisplayString(t: TurnTelemetry): string {
   const parts: string[] = [];
-  if (t.tps !== null) parts.push(`TPS ${t.tps.toFixed(1)} tok/s`);
+  parts.push(t.tps !== null ? `TPS ${t.tps.toFixed(1)} tok/s` : 'TPS —');
   if (t.timing.ttftMs !== null) {
     parts.push(`TTFT ${formatDuration(t.timing.ttftMs / 1000)}`);
   }

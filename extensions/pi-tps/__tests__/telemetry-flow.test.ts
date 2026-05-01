@@ -471,8 +471,8 @@ describe('pi-tps extension — telemetry flow', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
-    // No TPS displayed — burst delivery can't produce meaningful rate
-    expect(notification).not.toMatch(/TPS/);
+    // No TPS number displayed — burst delivery can't produce meaningful rate
+    expect(notification).toContain('TPS —');
 
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.tps).toBeNull();
@@ -506,7 +506,7 @@ describe('pi-tps extension — telemetry flow', () => {
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
-    expect(notification).not.toMatch(/TPS/);
+    expect(notification).toContain('TPS —');
 
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.tps).toBeNull();
