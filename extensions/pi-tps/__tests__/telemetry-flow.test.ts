@@ -59,7 +59,13 @@ describe('pi-tps extension — telemetry flow', () => {
       message: assistantMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
     });
-    await tick(150);
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
+    });
+    await tick(100);
     handlers['message_update']?.({
       type: 'message_update',
       message: assistantMessage,
@@ -216,6 +222,12 @@ describe('pi-tps extension — telemetry flow', () => {
       type: 'message_update',
       message: assistantMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    }); // TTFT
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'i' },
     });
     await tick(50);
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
@@ -359,8 +371,12 @@ describe('pi-tps extension — telemetry flow', () => {
 
     handlers['message_start']?.({ type: 'message_start', message: firstMessage });
     await tick(50);
-    handlers['message_update']?.(updateEvent);
-    await tick(150);
+    handlers['message_update']?.(updateEvent); // TTFT
+    await tick(50);
+    handlers['message_update']?.(updateEvent); // streaming
+    await tick(50);
+    handlers['message_update']?.(updateEvent); // streaming
+    await tick(50);
     handlers['message_end']?.({ type: 'message_end', message: firstMessage });
 
     // TOOL EXECUTION GAP: 1000ms (excluded from generation TPS)
@@ -372,8 +388,20 @@ describe('pi-tps extension — telemetry flow', () => {
       type: 'message_update',
       message: secondMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 't' },
-    });
-    await tick(300);
+    }); // TTFT
+    await tick(100);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: secondMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    }); // streaming
+    await tick(100);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: secondMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    }); // streaming
+    await tick(100);
     handlers['message_end']?.({ type: 'message_end', message: secondMessage });
 
     handlers['turn_end']?.(
@@ -387,11 +415,164 @@ describe('pi-tps extension — telemetry flow', () => {
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
-    expect(tps).toBeGreaterThan(1000); // True generation is fast
+    // Inter-update TPS includes tool gaps in the span, so it's diluted
+    // compared to pure generation TPS. Still well under 100K (burst artifact).
+    expect(tps).toBeGreaterThan(100);
     expect(tps).toBeLessThan(2000);
 
     expect(notification).toContain('out 1,000');
     expect(notification).toContain('in 600');
+  });
+
+  // ── Inter-update TPS ──────────────────────────────────────────────────
+
+  it('should produce null TPS for burst delivery (all updates in same tick)', async () => {
+    // Simulates the read-command case: all message_updates fire within
+    // a single event loop tick, so the inter-update span is 0ms.
+    const { handlers, notifySpy, appendEntrySpy } = fixture;
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Done' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 291,
+        output: 46,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 337,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const updateEvent = {
+      type: 'message_update' as const,
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta' as const, delta: 't' },
+    };
+
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: Date.now() });
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    // All updates fire without any tick gap — simulates SSE burst
+    handlers['message_update']?.(updateEvent); // TTFT
+    handlers['message_update']?.(updateEvent); // streaming (same tick)
+    handlers['message_update']?.(updateEvent); // streaming (same tick)
+    handlers['message_update']?.(updateEvent); // streaming (same tick)
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      fixture.mockCtx
+    );
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    // No TPS displayed — burst delivery can't produce meaningful rate
+    expect(notification).not.toMatch(/TPS/);
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeNull();
+    expect(data.timing.streamMs).toBeLessThan(1); // burst: sub-ms span
+    // Other telemetry still present
+    expect(notification).toContain('TTFT');
+    expect(notification).toContain('out 46');
+  });
+
+  it('should produce null TPS with only TTFT update and no streaming updates', async () => {
+    const { handlers, notifySpy, appendEntrySpy } = fixture;
+
+    const assistantMessage = makeAssistantMessage({ output: 20, input: 10 });
+
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: Date.now() });
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(50);
+    // Only TTFT update — no subsequent streaming updates
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    });
+    await tick(50);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      fixture.mockCtx
+    );
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).not.toMatch(/TPS/);
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeNull();
+    expect(data.timing.streamMs).toBeNull(); // no streaming updates at all
+  });
+
+  it('should calculate inter-update TPS from streaming updates', async () => {
+    const { handlers, notifySpy, appendEntrySpy } = fixture;
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'A longer response' }],
+      api: 'openai-completions',
+      provider: 'openai',
+      model: 'gpt-4',
+      usage: {
+        input: 100,
+        output: 500,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 600,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const updateEvent = {
+      type: 'message_update' as const,
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta' as const, delta: 't' },
+    };
+
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: Date.now() });
+    await tick(100);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(50); // TTFT
+    handlers['message_update']?.(updateEvent); // TTFT
+    await tick(100);
+    handlers['message_update']?.(updateEvent); // streaming #1
+    await tick(100);
+    handlers['message_update']?.(updateEvent); // streaming #2
+    await tick(100);
+    handlers['message_update']?.(updateEvent); // streaming #3
+    await tick(100);
+    handlers['message_update']?.(updateEvent); // streaming #4
+    await tick(100);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      fixture.mockCtx
+    );
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
+    expect(tpsMatch).toBeTruthy();
+    const tps = parseFloat(tpsMatch![1]);
+    // Inter-update span ~400ms (4 gaps of ~100ms between streaming updates)
+    // 500 tokens / 0.4s ≈ 1250 TPS (real timer is approximate, so just check sane range)
+    expect(tps).toBeGreaterThan(500);
+    expect(tps).toBeLessThan(5000); // no 452K burst artifact
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeGreaterThan(0);
+    expect(data.timing.streamMs).toBeGreaterThan(0);
   });
 
   // ── Missing turn_start ───────────────────────────────────────────────────

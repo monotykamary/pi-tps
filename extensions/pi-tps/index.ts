@@ -73,12 +73,13 @@ interface TurnTelemetry {
   timing: {
     ttftMs: number | null; // time to first token
     totalMs: number; // wall clock: turn_start → turn_end
-    generationMs: number; // actual streaming time (excludes stalls)
+    generationMs: number; // wall clock streaming time (message_start → message_end per message)
+    streamMs: number | null; // inter-update span: first streaming update → last streaming update
     stallMs: number; // accumulated gaps > STALL_THRESHOLD_MS
     stallCount: number; // how many discrete stall events
     messageCount: number; // assistant messages in this turn
   };
-  tps: number | null; // output / (generationMs / 1000)
+  tps: number | null; // output / (streamMs / 1000), null when burst/degenerate
   cost: {
     input: number;
     output: number;
@@ -97,6 +98,11 @@ interface TurnTiming {
   currentMessageStartMs: number | null;
   assistantMessages: AssistantMessage[];
   totalGenerationMs: number;
+  // Inter-update TPS tracking: measures the streaming span between
+  // the first and last non-TTFT message_update events.
+  updateCount: number; // number of message_update events after the first (TTFT) one
+  firstStreamUpdateMs: number | null; // timestamp of first non-TTFT update
+  lastStreamUpdateMs: number; // timestamp of most recent non-TTFT update
   stallMs: number;
   stallCount: number;
   inStall: boolean;
@@ -237,11 +243,22 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
 
   if (output <= 0) return null;
   if (!timing.firstTokenMs) return null;
-  if (timing.totalGenerationMs <= 0) return null;
   if (!model) return null;
 
   const totalMs = turnEndMs - timing.turnStartMs;
-  const tps = output / (timing.totalGenerationMs / 1000);
+
+  // Inter-update TPS: measures the streaming span between the first and
+  // last non-TTFT message_update events. Returns null when updates arrive
+  // in a single burst (span ≈ 0) — the measurement is degenerate.
+  // A minimum span of 1ms is required; below this, timing jitter from
+  // event-loop scheduling makes the rate meaningless (e.g. 46 tokens
+  // arriving in a 0.004ms burst → 11M tok/s).
+  const MIN_STREAM_MS = 1;
+  const streamMs =
+    timing.updateCount > 0 && timing.firstStreamUpdateMs !== null
+      ? timing.lastStreamUpdateMs - timing.firstStreamUpdateMs
+      : null;
+  const tps = streamMs !== null && streamMs >= MIN_STREAM_MS ? output / (streamMs / 1000) : null;
 
   return {
     model,
@@ -250,11 +267,12 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
       ttftMs: timing.firstTokenMs - timing.turnStartMs,
       totalMs,
       generationMs: timing.totalGenerationMs,
+      streamMs,
       stallMs: timing.stallMs,
       stallCount: timing.stallCount,
       messageCount: timing.messageCount,
     },
-    tps: Math.round(tps * 10) / 10,
+    tps: tps !== null ? Math.round(tps * 10) / 10 : null,
     cost: hasCost
       ? {
           input: costInput,
@@ -336,6 +354,9 @@ export default function tpsExtension(pi: ExtensionAPI) {
       currentMessageStartMs: null,
       assistantMessages: [],
       totalGenerationMs: 0,
+      updateCount: 0,
+      firstStreamUpdateMs: null,
+      lastStreamUpdateMs: 0,
       stallMs: 0,
       stallCount: 0,
       inStall: false,
@@ -379,6 +400,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
       currentTiming.lastUpdateMs = now;
       return;
     }
+
+    // Track inter-update streaming span for TPS calculation
+    currentTiming.updateCount++;
+    if (currentTiming.firstStreamUpdateMs === null) {
+      currentTiming.firstStreamUpdateMs = now;
+    }
+    currentTiming.lastStreamUpdateMs = now;
 
     const gap = now - currentTiming.lastUpdateMs;
 
