@@ -278,27 +278,57 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
   const avgInterChunkGap =
     streamMs !== null && timing.updateCount > 1 ? streamMs / (timing.updateCount - 1) : 0;
 
+  // ── Generation TPS ────────────────────────────────────────────────────
+  // Raw inference speed: output / (active streaming time / 1000).
+  // Excludes BOTH TTFT and known stalls — this is the speed at which the
+  // model was actually producing tokens during active generation.
+  //
+  // The stall-before-stream bug: when a stall occurs between TTFT and the
+  // first stream update, firstStreamUpdateMs is set AFTER the stall, making
+  // streamMs only cover the post-stall burst. Subtracting stallMs from
+  // streamMs gives the "active generation" span, but when stallMs ≥ streamMs
+  // the result is unreliable — the post-stall cluster could be a buffer-flush
+  // dispatch of pre-generated tokens, not sustained inference.
+  //
+  // Three guard conditions prevent inflation:
+  //  1. stallMs < streamMs: prevents stall-before-stream where
+  //     firstStreamUpdateMs lands AFTER the stall.
+  //  2. effectiveStreamMs >= 50ms: the active span must be long enough to
+  //     distinguish genuine generation from a dispatch artifact.
+  //  3. stallMs < effectiveStreamMs: when stalls exceed active generation
+  //     time (e.g. 998ms stall, 53ms active), the "active" span is likely
+  //     a buffer-flush burst of pre-generated tokens, not sustained
+  //     inference. Requiring stall time < active time ensures the
+  //     streaming window is dominated by generation, not stalls.
+  //
+  // Three-branch gate:
+  //   Primary:   all 3 guards pass → output / (effectiveStreamMs / 1000)
+  //   Fallback:  ≥2 updates, generationMs ≥50ms
+  //              → output / (effectiveGenMs / 1000)
+  //              Includes TTFT, underestimates, but never overshoots.
+  //   Else:      null — structurally unidentifiable.
   let tps: number | null = null;
   if (
     streamMs !== null &&
     streamMs >= MIN_STREAM_MS &&
     timing.updateCount >= MIN_STREAM_UPDATES &&
-    avgInterChunkGap >= MIN_INTER_CHUNK_MS
+    avgInterChunkGap >= MIN_INTER_CHUNK_MS &&
+    timing.stallMs < streamMs && // stalls must not dominate streaming span
+    streamMs - timing.stallMs >= MIN_GENERATION_MS && // effective span must be measurable
+    timing.stallMs < streamMs - timing.stallMs // stall time < active time
   ) {
-    // Primary: enough temporal samples with meaningful inter-chunk gaps.
-    // Each gap must exceed typical dispatch overhead, ensuring streamMs
-    // reflects generation timing rather than buffer-flush dispatch.
-    const raw = output / (streamMs / 1000);
+    // Active generation time: streaming window minus known stalls.
+    // streamMs already excludes TTFT; subtracting stallMs gives the
+    // time the model was actually generating tokens.
+    const effectiveStreamMs = streamMs - timing.stallMs;
+    const raw = output / (effectiveStreamMs / 1000);
     tps = Math.round(raw * 10) / 10;
-  } else if (
-    timing.updateCount >= 2 &&
-    timing.totalGenerationMs >= Math.max((streamMs ?? 0) * 2, MIN_GENERATION_MS)
-  ) {
-    // Fallback: streaming span is degenerate (buffered flush or too few
-    // chunks) but the overall generation window is long enough for a
-    // conservative rate estimate. Uses totalGenerationMs (includes
-    // TTFT), so this underestimates — better than overshooting.
-    const raw = output / (timing.totalGenerationMs / 1000);
+  } else if (timing.updateCount >= 2 && timing.totalGenerationMs >= MIN_GENERATION_MS) {
+    // Fallback: use generationMs (message_start → message_end) minus
+    // stalls. This includes TTFT, so it underestimates generation speed,
+    // but it's safe — no inflation possible.
+    const effectiveGenMs = Math.max(timing.totalGenerationMs - timing.stallMs, MIN_GENERATION_MS);
+    const raw = output / (effectiveGenMs / 1000);
     tps = Math.round(raw * 10) / 10;
   } else {
     tps = null;

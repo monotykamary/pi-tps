@@ -135,4 +135,75 @@ describe('pi-tps extension — stall detection', () => {
     expect(data.timing.stallCount).toBe(0);
     expect(data.timing.stallMs).toBe(0);
   });
+
+  it('should not produce inflated TPS when stall occurs before first stream update', async () => {
+    // This is the bug scenario: a large gap after TTFT causes the stall
+    // detector to fire on the first streaming update, but that means
+    // firstStreamUpdateMs is set AFTER the stall, making streamMs tiny.
+    const { handlers, notifySpy, appendEntrySpy } = fixture;
+
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Stall before stream' }],
+      api: 'openai-completions',
+      provider: 'deepseek',
+      model: 'deepseek-v4',
+      usage: {
+        input: 50,
+        output: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 150,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const updateEvent: MessageUpdateEvent = {
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    };
+
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: Date.now() });
+    await tick(100);
+    handlers['message_start']?.({ type: 'message_start', message: assistantMessage });
+    await tick(200);
+    handlers['message_update']?.(updateEvent); // TTFT
+
+    // Large gap (stall before any stream update)
+    await tick(3000);
+    handlers['message_update']?.(updateEvent); // First stream update (after stall)
+
+    // Short burst of updates
+    await tick(50);
+    handlers['message_update']?.(updateEvent);
+    await tick(50);
+    handlers['message_update']?.(updateEvent);
+    await tick(50);
+    handlers['message_update']?.(updateEvent);
+    await tick(50);
+    handlers['message_update']?.(updateEvent);
+
+    await tick(50);
+    handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
+      fixture.mockCtx
+    );
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const [, data] = appendEntrySpy.mock.calls[0];
+
+    // Verify stall was detected
+    expect(data.timing.stallMs).toBeGreaterThanOrEqual(2000);
+    expect(data.timing.stallCount).toBeGreaterThanOrEqual(1);
+
+    // TPS must be sane (not in the thousands)
+    // With stall guard: stallMs >= streamMs → fallback branch
+    // Fallback: effectiveGenMs = generationMs - stallMs
+    expect(data.tps).not.toBeNull();
+    expect(data.tps!).toBeLessThan(500); // sane, not thousands
+  });
 });
