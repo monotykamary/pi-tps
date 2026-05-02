@@ -58,19 +58,37 @@ describe('pi-tps extension — telemetry flow', () => {
       type: 'message_update',
       message: assistantMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
-    });
+    }); // TTFT
     await tick(50);
     handlers['message_update']?.({
       type: 'message_update',
       message: assistantMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
-    });
-    await tick(100);
+    }); // stream 1
+    await tick(50);
     handlers['message_update']?.({
       type: 'message_update',
       message: assistantMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
-    });
+    }); // stream 2
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
+    }); // stream 3
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
+    }); // stream 4
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
+    }); // stream 5
     await tick(300);
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
     handlers['turn_end']?.(
@@ -230,6 +248,30 @@ describe('pi-tps extension — telemetry flow', () => {
       assistantMessageEvent: { type: 'text_delta', delta: 'i' },
     });
     await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'i' },
+    });
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'i' },
+    });
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'i' },
+    });
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: assistantMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 'i' },
+    });
+    await tick(50);
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
     handlers['turn_end']?.(
       { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
@@ -377,6 +419,8 @@ describe('pi-tps extension — telemetry flow', () => {
     await tick(50);
     handlers['message_update']?.(updateEvent); // streaming
     await tick(50);
+    handlers['message_update']?.(updateEvent); // streaming
+    await tick(50);
     handlers['message_end']?.({ type: 'message_end', message: firstMessage });
 
     // TOOL EXECUTION GAP: 1000ms (excluded from generation TPS)
@@ -389,6 +433,12 @@ describe('pi-tps extension — telemetry flow', () => {
       message: secondMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 't' },
     }); // TTFT
+    await tick(100);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message: secondMessage,
+      assistantMessageEvent: { type: 'text_delta', delta: 't' },
+    }); // streaming
     await tick(100);
     handlers['message_update']?.({
       type: 'message_update',
@@ -415,9 +465,9 @@ describe('pi-tps extension — telemetry flow', () => {
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
-    // Inter-update TPS includes tool gaps in the span, so it's diluted
-    // compared to pure generation TPS. Still well under 100K (burst artifact).
-    expect(tps).toBeGreaterThan(100);
+    // Inter-update TPS: 3+3=6 streaming updates across two messages.
+    // Span includes tool gap but still well under 100K (burst artifact).
+    expect(tps).toBeGreaterThan(50);
     expect(tps).toBeLessThan(2000);
 
     expect(notification).toContain('out 1,000');
@@ -554,6 +604,8 @@ describe('pi-tps extension — telemetry flow', () => {
     await tick(100);
     handlers['message_update']?.(updateEvent); // streaming #4
     await tick(100);
+    handlers['message_update']?.(updateEvent); // streaming #5
+    await tick(100);
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
     handlers['turn_end']?.(
       { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
@@ -565,9 +617,9 @@ describe('pi-tps extension — telemetry flow', () => {
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
-    // Inter-update span ~400ms (4 gaps of ~100ms between streaming updates)
-    // 500 tokens / 0.4s ≈ 1250 TPS (real timer is approximate, so just check sane range)
-    expect(tps).toBeGreaterThan(500);
+    // Inter-update span ~500ms (5 gaps of ~100ms between streaming updates)
+    // 500 tokens / 0.5s ≈ 1000 TPS (real timer is approximate, so just check sane range)
+    expect(tps).toBeGreaterThan(400);
     expect(tps).toBeLessThan(5000); // no 452K burst artifact
 
     const [, data] = appendEntrySpy.mock.calls[0];

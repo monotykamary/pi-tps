@@ -20,7 +20,9 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
    * that Date.now() (1ms floor) would lose.
    *
    * `streamUpdates` provides timestamps for non-TTFT message_update events.
-   * At least 2 entries with a non-zero span are required for inter-update TPS.
+   * At least MIN_STREAM_UPDATES (5) entries with a non-zero span are now
+   * required for inter-update TPS. Fewer updates falls back to generationMs
+   * (if generationMs > 2× streamMs) or null.
    */
   function driveTurn(clocks: {
     turnStart: number;
@@ -95,13 +97,13 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
     return { notifySpy, appendEntrySpy };
   }
 
-  it('should produce realistic TPS for short generation spans with performance.now()', () => {
+  it('should produce realistic TPS with sufficient streaming updates (≥5)', () => {
     const { notifySpy, appendEntrySpy } = driveTurn({
       turnStart: 0,
       messageStart: 200,
       firstUpdate: 200.123,
-      streamUpdates: [400, 600],
-      messageEnd: 700,
+      streamUpdates: [400, 500, 600, 700, 800],
+      messageEnd: 900,
     });
 
     expect(notifySpy).toHaveBeenCalledOnce();
@@ -109,14 +111,14 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
     const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
     expect(tpsMatch).toBeTruthy();
     const tps = parseFloat(tpsMatch![1]);
-    // 20 tokens / 0.2s (inter-update span: 600ms - 400ms) = 100.0 TPS
-    expect(tps).toBeGreaterThanOrEqual(90);
-    expect(tps).toBeLessThanOrEqual(110);
+    // 20 tokens / 0.4s (streamMs: 800 - 400) = 50.0 TPS
+    expect(tps).toBeGreaterThanOrEqual(40);
+    expect(tps).toBeLessThanOrEqual(60);
 
     const [, data] = appendEntrySpy.mock.calls[0];
-    expect(data.timing.generationMs).toBeGreaterThanOrEqual(490);
+    expect(data.timing.generationMs).toBeGreaterThanOrEqual(690);
     expect(data.timing.ttftMs).toBeGreaterThanOrEqual(190);
-    expect(data.timing.streamMs).toBe(200); // 600 - 400
+    expect(data.timing.streamMs).toBe(400); // 800 - 400
   });
 
   it('should capture sub-millisecond TTFT precision', () => {
@@ -124,7 +126,7 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
       turnStart: 0,
       messageStart: 23.456,
       firstUpdate: 23.579,
-      streamUpdates: [100, 200, 523],
+      streamUpdates: [100, 200, 300, 400, 523],
       messageEnd: 523.456,
     });
 
@@ -133,25 +135,25 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
     expect(data.timing.ttftMs).toBeLessThanOrEqual(24);
   });
 
-  it('should produce null TPS when all streaming updates arrive in a burst', () => {
-    // Simulates the read-command case: all updates fire in the same event loop tick,
-    // so the inter-update span is 0ms — a degenerate measurement.
+  it('should produce null TPS when all streaming updates arrive in a burst (≤4 updates)', () => {
+    // Simulates the read-command case: updates fire in quick burst with few chunks.
+    // With only 1 post-TTFT update, updateCount=1 < MIN_STREAM_UPDATES=5.
     const { notifySpy, appendEntrySpy } = driveTurn({
       turnStart: 0,
       messageStart: 100,
       firstUpdate: 100.05,
-      streamUpdates: [100.05], // same tick as TTFT → streamMs = 0
+      streamUpdates: [100.05], // 1 post-TTFT update
       messageEnd: 100.5,
     });
 
     expect(notifySpy).toHaveBeenCalledOnce();
     const notification = notifySpy.mock.calls[0][0] as string;
-    // TPS shown as dash — burst delivery can't produce meaningful rate
+    // TPS shown as dash — not enough chunks for meaningful rate
     expect(notification).toContain('TPS —');
 
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.timing.generationMs).toBeGreaterThan(0);
-    expect(data.timing.streamMs).toBe(0); // burst: no measurable span
+    expect(data.timing.streamMs).toBe(0);
     expect(data.tps).toBeNull();
   });
 
@@ -159,14 +161,16 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
     const { handlers, appendEntrySpy } = fixture;
     const spy = vi.spyOn(performance, 'now');
     // turn_start(2), message_start(1), message_update-TTFT(1),
-    // 2 streaming updates(2), message_end(1), turn_end(1) = 8 calls
-    const timestamps = [0, 0, 100, 100.001, 100.5, 101, 101.234, 101.234];
+    // 5 streaming updates(5), message_end(1), turn_end(1) = 11 calls
+    // indices: 0-1=turn_start, 2=message_start, 3=TTFT,
+    // 4-8=streaming, 9=message_end, 10=turn_end
+    const timestamps = [0, 0, 100, 100.001, 100.5, 101, 101.2, 101.4, 101.8, 102, 102];
     let callIdx = 0;
     spy.mockImplementation(() => timestamps[Math.min(callIdx++, timestamps.length - 1)]);
 
     const assistantMessage: AssistantMessage = {
       role: 'assistant',
-      content: [{ type: 'text', text: 'Hi' }],
+      content: [{ type: 'text', text: 'Hi world test example' }],
       api: 'openai-completions',
       provider: 'openai',
       model: 'gpt-4',
@@ -183,17 +187,14 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
       message: assistantMessage,
       assistantMessageEvent: { type: 'text_delta', delta: 'H' },
     });
-    // Streaming updates
-    handlers['message_update']?.({
-      type: 'message_update',
-      message: assistantMessage,
-      assistantMessageEvent: { type: 'text_delta', delta: 'i' },
-    });
-    handlers['message_update']?.({
-      type: 'message_update',
-      message: assistantMessage,
-      assistantMessageEvent: { type: 'text_delta', delta: '!' },
-    });
+    // Streaming updates (5 = MIN_STREAM_UPDATES)
+    for (let i = 0; i < 5; i++) {
+      handlers['message_update']?.({
+        type: 'message_update',
+        message: assistantMessage,
+        assistantMessageEvent: { type: 'text_delta', delta: 'i' },
+      });
+    }
     handlers['message_end']?.({ type: 'message_end', message: assistantMessage });
     handlers['turn_end']?.(
       { type: 'turn_end', turnIndex: 0, message: assistantMessage, toolResults: [] },
@@ -207,7 +208,145 @@ describe('pi-tps extension — precision timing (performance.now())', () => {
 
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.timing.generationMs).toBeGreaterThan(1);
-    // Inter-update span: 101 - 100.5 = 0.5ms
-    expect(data.timing.streamMs).toBe(0.5);
+    // Inter-update span: 101.8 - 100.5 = 1.3ms
+    expect(data.timing.streamMs).toBeCloseTo(1.3, 1); // last stream(101.8) - first stream(100.5)
+  });
+
+  // ─── Compound gate tests (MIN_STREAM_UPDATES + generationMs fallback) ───
+
+  it('should fallback to generationMs TPS when few chunks but generation time >> burst span', () => {
+    // 2 post-TTFT updates (updateCount=2), generationMs (200ms) is >= 50ms floor
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 50,
+      firstUpdate: 50.1,
+      streamUpdates: [50.15, 50.3],
+      messageEnd: 250,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const [, data] = appendEntrySpy.mock.calls[0];
+    // Falls back to generationMs: 20 tokens / 0.2s = 100 TPS
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).not.toContain('TPS —');
+
+    const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
+    expect(tpsMatch).toBeTruthy();
+    const tps = parseFloat(tpsMatch![1]);
+    expect(tps).toBeGreaterThanOrEqual(70);
+    expect(tps).toBeLessThanOrEqual(130);
+
+    expect(data.tps).not.toBeNull();
+  });
+
+  it('should produce null TPS for fast burst where generationMs ≈ streamMs', () => {
+    // 2 post-TTFT updates, generationMs (0.3ms) is NOT > 2× streamMs (0.2ms)
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.1,
+      streamUpdates: [100.15, 100.3],
+      messageEnd: 100.4,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).toContain('TPS —');
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeNull();
+    // Structurally unidentifiable: too few chunks, no reliable timebase
+    expect(data.timing.streamMs).toBeGreaterThan(0);
+    expect(data.timing.generationMs).toBeLessThan(5);
+  });
+
+  it('should return null TPS for exactly 4 post-TTFT updates (just below gate)', () => {
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.1,
+      streamUpdates: [101, 102, 103, 104],
+      messageEnd: 105,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).toContain('TPS —');
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeNull();
+    expect(data.timing.streamMs).toBe(3); // 104 - 101
+  });
+
+  it('should return realistic TPS for exactly 5 post-TTFT updates (at gate)', () => {
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.1,
+      streamUpdates: [150, 200, 250, 300, 350],
+      messageEnd: 400,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).not.toContain('TPS —');
+
+    // 20 tokens / 0.2s (streamMs: 350 - 150) = 100 TPS
+    const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
+    expect(tpsMatch).toBeTruthy();
+    const tps = parseFloat(tpsMatch![1]);
+    expect(tps).toBeGreaterThanOrEqual(90);
+    expect(tps).toBeLessThanOrEqual(110);
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).not.toBeNull();
+    expect(data.timing.streamMs).toBe(200); // 350 - 150
+  });
+
+  it('should allow very high measured TPS when updateCount >= MIN_STREAM_UPDATES and avgGap >= 1ms', () => {
+    // 5 updates over 4ms (1ms avg gap) with 20 tokens → 5000 TPS
+    // This should NOT be capped — it's a legitimate measurement with enough
+    // temporal samples and meaningful inter-chunk gaps.
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.1,
+      streamUpdates: [101.1, 102.1, 103.1, 104.1, 105.1],
+      messageEnd: 105.5,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    expect(notification).not.toContain('TPS —');
+
+    // 20 tokens / 0.004s (streamMs: 105.1 - 101.1 = 4ms) = 5000 TPS
+    const tpsMatch = notification.match(/TPS (\d+(?:\.\d+)?) tok\/s/);
+    expect(tpsMatch).toBeTruthy();
+    const tps = parseFloat(tpsMatch![1]);
+    expect(tps).toBeGreaterThanOrEqual(4_500);
+    expect(tps).toBeLessThanOrEqual(5_500);
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeGreaterThanOrEqual(4_500);
+  });
+
+  it('should return null TPS when avg inter-chunk gap < 1ms (buffer-flush signature)', () => {
+    // 5 updates over 1ms (0.25ms avg gap) — looks like a buffer flush,
+    // even with enough update count.
+    const { notifySpy, appendEntrySpy } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.1,
+      streamUpdates: [100.2, 100.4, 100.6, 100.8, 101.0],
+      messageEnd: 101.5,
+    });
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const notification = notifySpy.mock.calls[0][0] as string;
+    // Dispatch overhead dominates: can't distinguish from generation timing
+    expect(notification).toContain('TPS —');
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.tps).toBeNull();
   });
 });

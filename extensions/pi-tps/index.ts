@@ -248,17 +248,61 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
   const totalMs = turnEndMs - timing.turnStartMs;
 
   // Inter-update TPS: measures the streaming span between the first and
-  // last non-TTFT message_update events. Returns null when updates arrive
-  // in a single burst (span ≈ 0) — the measurement is degenerate.
-  // A minimum span of 1ms is required; below this, timing jitter from
-  // event-loop scheduling makes the rate meaningless (e.g. 46 tokens
-  // arriving in a 0.004ms burst → 11M tok/s).
+  // last non-TTFT message_update events.
+  //
+  // Three-branch gate:
+  //   Primary:   ≥5 updates, avg inter-chunk gap ≥1ms → streamMs is genuine
+  //              generation timing, not buffer-flush dispatch overhead.
+  //   Fallback:  ≥2 updates, totalGenerationMs ≥50ms → conservative rate
+  //              using the full generation window (includes TTFT, so it
+  //              underestimates — by design, to avoid overshooting).
+  //   Else:      null — structurally unidentifiable.
+  //
+  // The avg inter-chunk gap is the key signal: buffer flushes dispatch
+  // chunks with ~0.3–0.5ms gaps (network overhead only), while genuine
+  // streaming at 3000 TPS with 5-token chunks has ~1.7ms gaps. A 1ms
+  // threshold cleanly separates the two regimes without capping TPS by
+  // magnitude — a legitimate 5000 TPS provider with 10-token chunks
+  // still passes (2ms gaps), and future faster hardware with larger
+  // batches passes too.
   const MIN_STREAM_MS = 1;
+  const MIN_STREAM_UPDATES = 5;
+  const MIN_INTER_CHUNK_MS = 1;
+  const MIN_GENERATION_MS = 50;
+
   const streamMs =
     timing.updateCount > 0 && timing.firstStreamUpdateMs !== null
       ? timing.lastStreamUpdateMs - timing.firstStreamUpdateMs
       : null;
-  const tps = streamMs !== null && streamMs >= MIN_STREAM_MS ? output / (streamMs / 1000) : null;
+
+  const avgInterChunkGap =
+    streamMs !== null && timing.updateCount > 1 ? streamMs / (timing.updateCount - 1) : 0;
+
+  let tps: number | null = null;
+  if (
+    streamMs !== null &&
+    streamMs >= MIN_STREAM_MS &&
+    timing.updateCount >= MIN_STREAM_UPDATES &&
+    avgInterChunkGap >= MIN_INTER_CHUNK_MS
+  ) {
+    // Primary: enough temporal samples with meaningful inter-chunk gaps.
+    // Each gap must exceed typical dispatch overhead, ensuring streamMs
+    // reflects generation timing rather than buffer-flush dispatch.
+    const raw = output / (streamMs / 1000);
+    tps = Math.round(raw * 10) / 10;
+  } else if (
+    timing.updateCount >= 2 &&
+    timing.totalGenerationMs >= Math.max((streamMs ?? 0) * 2, MIN_GENERATION_MS)
+  ) {
+    // Fallback: streaming span is degenerate (buffered flush or too few
+    // chunks) but the overall generation window is long enough for a
+    // conservative rate estimate. Uses totalGenerationMs (includes
+    // TTFT), so this underestimates — better than overshooting.
+    const raw = output / (timing.totalGenerationMs / 1000);
+    tps = Math.round(raw * 10) / 10;
+  } else {
+    tps = null;
+  }
 
   return {
     model,
@@ -272,7 +316,7 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
       stallCount: timing.stallCount,
       messageCount: timing.messageCount,
     },
-    tps: tps !== null ? Math.round(tps * 10) / 10 : null,
+    tps,
     cost: hasCost
       ? {
           input: costInput,
