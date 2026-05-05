@@ -479,7 +479,7 @@ describe('pi-tps extension — telemetry flow', () => {
     expect(tps).toBeGreaterThan(50);
     expect(tps).toBeLessThan(2000);
 
-    expect(notification).toContain('out 1,000');
+    expect(notification).toContain('out 1K');
     expect(notification).toContain('in 600');
   });
 

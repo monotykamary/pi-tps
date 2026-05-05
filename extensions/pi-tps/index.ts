@@ -122,8 +122,32 @@ function isAssistantMessage(message: unknown): message is AssistantMessage {
   return true;
 }
 
+/**
+ * Format a number with human-readable scaling (K, M, B).
+ * - Values < 1000: raw integer (e.g. 567 → "567")
+ * - Values ≥ 1000: scaled with one decimal, dropping ".0" (e.g. 1234 → "1.2K", 2000 → "2K")
+ * - Handles up to billions (e.g. 1_234_567_890 → "1.2B")
+ */
 function formatNumber(num: number): string {
-  return num.toLocaleString();
+  if (num < 1_000) return String(num);
+
+  let value: number;
+  let suffix: string;
+
+  if (num >= 1_000_000_000) {
+    value = num / 1_000_000_000;
+    suffix = 'B';
+  } else if (num >= 1_000_000) {
+    value = num / 1_000_000;
+    suffix = 'M';
+  } else {
+    value = num / 1_000;
+    suffix = 'K';
+  }
+
+  // Drop trailing ".0" for clean display
+  const formatted = value.toFixed(1);
+  return formatted.endsWith('.0') ? `${value.toFixed(0)}${suffix}` : `${formatted}${suffix}`;
 }
 
 /**
