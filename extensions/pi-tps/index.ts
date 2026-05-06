@@ -219,8 +219,8 @@ function composeDisplayString(t: TurnTelemetry): string {
     parts.push(`TTFT ${formatDuration(t.timing.ttftMs / 1000)}`);
   }
   parts.push(formatDuration(t.timing.totalMs / 1000));
-  parts.push(`out ${formatNumber(t.tokens.output)}`);
   parts.push(`in ${formatNumber(t.tokens.input)}`);
+  parts.push(`out ${formatNumber(t.tokens.output)}`);
   if (t.timing.stallMs > 0) {
     const stallStr = formatDuration(t.timing.stallMs / 1000);
     parts.push(`stall ${stallStr}×${t.timing.stallCount}`);
