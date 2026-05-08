@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type { AssistantMessage } from '@mariozechner/pi-ai';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { createTestFixture, activateExtension, tick } from './helpers';
 
 describe('pi-tps extension — precision timing (performance.now())', () => {

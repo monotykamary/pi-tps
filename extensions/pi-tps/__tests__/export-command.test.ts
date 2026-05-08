@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type { ExtensionCommandContext } from '@mariozechner/pi-coding-agent';
+import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { createTestFixture, activateExtension, tick } from './helpers';
 
 describe('pi-tps extension — export command', () => {

@@ -13,15 +13,15 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
-import type { AssistantMessage } from '@mariozechner/pi-ai';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 
 // ─── Event types (not exported from pi's public API) ────────────────────────
-// These mirror the internal types in @mariozechner/pi-coding-agent's
+// These mirror the internal types in @earendil-works/pi-coding-agent's
 // dist/core/extensions/types.d.ts. When pi starts exporting them, replace
 // these local definitions with imports.
 
