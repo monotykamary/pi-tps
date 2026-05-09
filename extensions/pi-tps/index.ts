@@ -293,6 +293,9 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
   const MIN_STREAM_UPDATES = 5;
   const MIN_INTER_CHUNK_MS = 1;
   const MIN_GENERATION_MS = 50;
+  const ACTIVE_TIME_THRESHOLD_MS = 200;
+  const STALL_REDUCTION_DENOM = 2;
+  const STALL_DOMINANCE_RATIO = 0.85;
 
   const streamMs =
     timing.updateCount > 0 && timing.firstStreamUpdateMs !== null
@@ -351,7 +354,18 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
     // Fallback: use generationMs (message_start → message_end) minus
     // stalls. This includes TTFT, so it underestimates generation speed,
     // but it's safe — no inflation possible.
-    const effectiveGenMs = Math.max(timing.totalGenerationMs - timing.stallMs, MIN_GENERATION_MS);
+    let effectiveGenMs = timing.totalGenerationMs - timing.stallMs;
+    const stallsDominate =
+      effectiveGenMs < ACTIVE_TIME_THRESHOLD_MS ||
+      timing.stallMs > timing.totalGenerationMs * STALL_DOMINANCE_RATIO;
+    if (stallsDominate) {
+      effectiveGenMs = Math.max(
+        timing.totalGenerationMs - timing.stallMs / STALL_REDUCTION_DENOM,
+        MIN_GENERATION_MS
+      );
+    } else {
+      effectiveGenMs = Math.max(effectiveGenMs, MIN_GENERATION_MS);
+    }
     const raw = output / (effectiveGenMs / 1000);
     tps = Math.round(raw * 10) / 10;
   } else {
