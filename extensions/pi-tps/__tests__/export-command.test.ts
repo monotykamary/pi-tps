@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import { unlinkSync, existsSync } from 'fs';
 import { createTestFixture, activateExtension, tick } from './helpers';
 
 describe('pi-tps extension — export command', () => {
@@ -43,6 +44,20 @@ describe('pi-tps extension — export command', () => {
   });
 
   afterEach(() => {
+    // Clean up any pi-telemetry files written by the export handler
+    for (const call of fixture.notifySpy.mock.calls) {
+      const msg = call[0] as string;
+      if (typeof msg === 'string' && msg.includes('→ ')) {
+        const filepath = msg.split('→ ')[1];
+        if (filepath && existsSync(filepath)) {
+          try {
+            unlinkSync(filepath);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
     vi.restoreAllMocks();
   });
 
