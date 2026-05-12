@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { unlinkSync, existsSync } from 'fs';
 import { createTestFixture, activateExtension, tick } from './helpers';
+
+vi.mock('child_process', () => ({ execSync: vi.fn() }));
 
 describe('pi-tps extension — export command', () => {
   let fixture: ReturnType<typeof createTestFixture>;
