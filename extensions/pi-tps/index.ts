@@ -9,6 +9,7 @@
  * Originally from: https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts
  */
 
+import { execSync } from 'child_process';
 import { writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -674,6 +675,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
       if (customCount > 0) parts.push(`${customCount} telemetry`);
       if (structuralCount > 0) parts.push(`${structuralCount} structural`);
       const summary = parts.length > 0 ? parts.join(' + ') : `${exportedEntries.length} entries`;
+      try {
+        const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+        execSync(`${opener} ${JSON.stringify(dir)}`, { stdio: 'ignore' });
+      } catch {
+        // opener not available — ignore silently
+      }
+
       ctx.ui.notify(`Exported ${summary} → ${filepath}`, 'info');
     },
   });
