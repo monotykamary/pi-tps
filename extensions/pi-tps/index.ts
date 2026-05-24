@@ -406,7 +406,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
   let currentTiming: TurnTiming | null = null;
 
   // Cached session entries for argument completion (captured on session_start / session_tree)
-  let cachedEntries: Array<{ type?: string; customType?: string }> = [];
+  let cachedEntries: Array<{ type?: string; customType?: string; data?: unknown }> = [];
 
   // ── Rehydration ─────────────────────────────────────────────────────────
 
@@ -418,7 +418,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
    */
   function restoreTPSNotification(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
-    const entries = ctx.sessionManager.getEntries();
+    const entries = cachedEntries.length > 0 ? cachedEntries : ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
@@ -445,7 +445,6 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // Restore notification on session start/resume — skip only brand-new sessions
   pi.on('session_start', (_event, ctx) => {
-    // Restore for all reasons including startup/reload (they may continue a previous session)
     cachedEntries = ctx.sessionManager.getEntries();
     restoreTPSNotification(ctx);
   });
