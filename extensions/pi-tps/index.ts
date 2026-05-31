@@ -585,7 +585,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
     cachedEntries.push({ type: 'custom', customType: 'tps' });
   });
 
-  // ── Export command ──────────────────────────────────────────────────────
+  // ── Export commands ─────────────────────────────────────────────────────
 
   pi.registerCommand('tps-export', {
     description:
@@ -682,6 +682,53 @@ export default function tpsExtension(pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(`Exported ${summary} → ${filepath}`, 'info');
+    },
+  });
+
+  // ── Session export command ─────────────────────────────────────────────────
+
+  pi.registerCommand('session-export', {
+    description:
+      'Export full session JSONL (all entry types, current branch only; --full for all branches)',
+    getArgumentCompletions: (argumentPrefix: string) => {
+      if ('--full'.startsWith(argumentPrefix)) {
+        return [{ value: '--full', label: '--full (all branches, not just current)' }];
+      }
+      return [];
+    },
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const full = args.trim().split(/\s+/).includes('--full');
+
+      const entries = full ? ctx.sessionManager.getEntries() : ctx.sessionManager.getBranch();
+
+      if (entries.length === 0) {
+        const scope = full ? 'all-entries' : 'current-branch';
+        ctx.ui.notify(`No entries found in ${scope}`, 'warning');
+        return;
+      }
+
+      // Write to tmp directory
+      const cacheBase = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
+      const dir = join(cacheBase, 'pi-sessions');
+      mkdirSync(dir, { recursive: true });
+
+      const sessionId = ctx.sessionManager.getSessionId?.() ?? 'unknown';
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const scope = full ? 'full' : 'branch';
+      const filename = `pi-session-${scope}-${sessionId.slice(0, 8)}-${timestamp}.jsonl`;
+      const filepath = join(dir, filename);
+
+      const content = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+      writeFileSync(filepath, content);
+
+      try {
+        const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+        execSync(`${opener} ${JSON.stringify(dir)}`, { stdio: 'ignore' });
+      } catch {
+        // opener not available — ignore silently
+      }
+
+      ctx.ui.notify(`Exported ${entries.length} entries → ${filepath}`, 'info');
     },
   });
 }

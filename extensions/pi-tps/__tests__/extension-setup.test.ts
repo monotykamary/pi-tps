@@ -30,5 +30,12 @@ describe('pi-tps extension — setup', () => {
         handler: expect.any(Function),
       })
     );
+    expect(registerCommandSpy).toHaveBeenCalledWith(
+      'session-export',
+      expect.objectContaining({
+        description: expect.any(String),
+        handler: expect.any(Function),
+      })
+    );
   });
 });
