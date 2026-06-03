@@ -1,10 +1,15 @@
-# pi-tps
+<div align="center">
 
-### Tokens-per-second tracker for pi
+# 📊 pi-tps
 
-**[Install](#install)** · **[Output format](#output-format)** · **[How it works](#how-it-works)** · **[Export](#export-command)** · **[Events](#telemetry-event)**
+**Tokens-per-second tracker for [pi](https://github.com/earendil-works/pi-coding-agent)**
 
-See your LLM generation speed, TTFT, and inference stalls after every agent turn. Handles multi-message turns, burst delivery, and stall-before-stream artifacts.
+_Generation speed, TTFT, stall detection, and cost — after every agent turn._
+
+[![pi extension](https://img.shields.io/badge/pi-extension-blueviolet)](https://github.com/earendil-works/pi-coding-agent)
+[![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+
+</div>
 
 ---
 
