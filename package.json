@@ -1,5 +1,5 @@
 {
-  "name": "pi-tps",
+  "name": "@monotykamary/pi-tps",
   "version": "1.0.0",
   "description": "Tokens-per-second tracker for pi — see your LLM generation speed after every agent turn",
   "keywords": [
