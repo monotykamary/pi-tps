@@ -60,6 +60,13 @@ interface SessionTreeEvent {
   oldLeafId: string | null;
 }
 
+interface ToolExecutionStartEvent {
+  type: 'tool_execution_start';
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+}
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Minimum gap between token updates to count as a stall (ms) */
@@ -108,6 +115,8 @@ interface TurnTiming {
   stallCount: number;
   inStall: boolean;
   messageCount: number;
+  isToolCall: boolean; // tool_execution_start fired during this turn
+  isPrimaryBranch: boolean; // TPS came from primary-branch (reliable) measurement
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -336,6 +345,7 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
   //              Includes TTFT, underestimates, but never overshoots.
   //   Else:      null — structurally unidentifiable.
   let tps: number | null = null;
+  let isPrimaryBranch = false;
   if (
     streamMs !== null &&
     streamMs >= MIN_STREAM_MS &&
@@ -351,6 +361,7 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
     const effectiveStreamMs = streamMs - timing.stallMs;
     const raw = output / (effectiveStreamMs / 1000);
     tps = Math.round(raw * 10) / 10;
+    isPrimaryBranch = true;
   } else if (timing.updateCount >= 2 && timing.totalGenerationMs >= MIN_GENERATION_MS) {
     // Fallback: use generationMs (message_start → message_end) minus
     // stalls. This includes TTFT, so it underestimates generation speed,
@@ -386,6 +397,7 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
       messageCount: timing.messageCount,
     },
     tps,
+    isPrimaryBranch,
     cost: hasCost
       ? {
           input: costInput,
@@ -404,6 +416,10 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
 export default function tpsExtension(pi: ExtensionAPI) {
   // Current turn timing state
   let currentTiming: TurnTiming | null = null;
+
+  // Per-model TPS cap: highest reliable (primary-branch, non-tool-call) TPS observed.
+  // Tool-call turns get clamped to this value. Only set by reliable streaming measurements.
+  const tpsCaps = new Map<string, number>(); // "provider:modelId" → cap
 
   // Cached session entries for argument completion (captured on session_start / session_tree)
   let cachedEntries: Array<{ type?: string; customType?: string; data?: unknown }> = [];
@@ -473,6 +489,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
       stallCount: 0,
       inStall: false,
       messageCount: 0,
+      isToolCall: false,
+      isPrimaryBranch: false,
     };
   });
 
@@ -537,6 +555,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
     currentTiming.lastUpdateMs = now;
   });
 
+  // Track when a tool starts executing — marks this turn as a tool call
+  // for the dynamic TPS cap (tool-call turns only get capped, never set the cap).
+  pi.on('tool_execution_start', (_event: ToolExecutionStartEvent) => {
+    if (!currentTiming) return;
+    currentTiming.isToolCall = true;
+  });
+
   // Track when a message ends
   pi.on('message_end', (event: MessageEndEvent) => {
     if (!currentTiming) return;
@@ -568,6 +593,28 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const turnEndMs = performance.now();
     const telemetry = buildTelemetry(timing, turnEndMs);
     if (!telemetry) return;
+
+    // ── Dynamic TPS cap ────────────────────────────────────────────────
+    // Only non-tool-call, primary-branch (reliable) measurements set the cap.
+    // Tool-call turns get clamped to the cap to prevent inflation from
+    // short outputs over tiny time windows.
+    const modelKey = `${telemetry.model.provider}:${telemetry.model.modelId}`;
+
+    if (telemetry.isPrimaryBranch && !timing.isToolCall && telemetry.tps !== null) {
+      const currentCap = tpsCaps.get(modelKey);
+      if (currentCap === undefined || telemetry.tps > currentCap) {
+        tpsCaps.set(modelKey, telemetry.tps);
+      }
+    }
+
+    if (timing.isToolCall && telemetry.tps !== null) {
+      const cap = tpsCaps.get(modelKey);
+      if (cap !== undefined) {
+        telemetry.tps = Math.min(telemetry.tps, cap);
+      } else {
+        telemetry.tps = null;
+      }
+    }
 
     // Persist structured telemetry to session for export and rehydration
     pi.appendEntry('tps', telemetry);
