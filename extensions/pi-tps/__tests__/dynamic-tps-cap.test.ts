@@ -147,10 +147,10 @@ describe('pi-tps extension — dynamic TPS cap', () => {
     expect(data.tps).toBeGreaterThan(0);
   });
 
-  // ── Tool calls do not set the cap ────────────────────────────────────────
+  // ── Tool calls do not set the cap from fallback ─────────────────────────────
 
-  it('should not let tool-call turns set the cap', () => {
-    // Turn 1: tool call → no cap exists yet, TPS is null
+  it('should not let fallback-branch tool-call turns set the cap', () => {
+    // Turn 1: tool call with fallback TPS (2 updates, short generation) — should NOT set the cap
     const { appendEntrySpy: spy1 } = driveTurn({
       turnStart: 0,
       messageStart: 100,
@@ -160,7 +160,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       isToolCall: true,
     });
     const [, data1] = spy1.mock.calls[0];
-    // No cap → tool call TPS is null
+    // No cap → fallback tool call TPS is null
     expect(data1.tps).toBeNull();
 
     // Turn 2: reliable streaming response at ~50 TPS → sets the cap
@@ -175,7 +175,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
     expect(data2.tps).toBeGreaterThanOrEqual(40);
     expect(data2.tps).toBeLessThanOrEqual(60);
 
-    // Turn 3: another tool call — should now be clamped to 50
+    // Turn 3: another fallback tool call — should now be clamped to 50
     const { appendEntrySpy: spy3 } = driveTurn({
       turnStart: 0,
       messageStart: 100,
@@ -187,6 +187,40 @@ describe('pi-tps extension — dynamic TPS cap', () => {
     const [, data3] = spy3.mock.calls[2];
     expect(data3.tps).not.toBeNull();
     expect(data3.tps).toBeLessThanOrEqual(55);
+  });
+
+  // ── Primary-branch tool calls (reasoning) set the cap ──────────────────────
+
+  it('should let primary-branch tool-call turns set the cap (e.g. reasoning before tool call)', () => {
+    // Turn 1: tool call with PRIMARY-branch TPS (reasoning + tool call, enough updates/time)
+    // 20 tokens / 0.4s = 50 TPS from primary branch, isToolCall = true
+    const { appendEntrySpy: spy1 } = driveTurn({
+      turnStart: 0,
+      messageStart: 200,
+      firstUpdate: 200.123,
+      streamUpdates: [400, 500, 600, 700, 800],
+      messageEnd: 900,
+      isToolCall: true,
+    });
+    const [, data1] = spy1.mock.calls[0];
+    // Primary branch + isToolCall → TPS is still computed (not null/capped)
+    expect(data1.tps).toBeGreaterThanOrEqual(40);
+    expect(data1.tps).toBeLessThanOrEqual(60);
+    expect(data1.isPrimaryBranch).toBe(true);
+
+    // Turn 2: fallback tool call — should be clamped to the cap from turn 1
+    const { appendEntrySpy: spy2 } = driveTurn({
+      turnStart: 0,
+      messageStart: 100,
+      firstUpdate: 100.1,
+      streamUpdates: [100.15, 100.3],
+      messageEnd: 200,
+      isToolCall: true,
+    });
+    const [, data2] = spy2.mock.calls[1];
+    expect(data2.tps).not.toBeNull();
+    // Clamped to ~50 cap set by the primary-branch tool call in turn 1
+    expect(data2.tps).toBeLessThanOrEqual(55);
   });
 
   // ── Cold start: no cap yet ────────────────────────────────────────────────

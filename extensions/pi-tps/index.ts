@@ -601,7 +601,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
     // short outputs over tiny time windows.
     const modelKey = `${telemetry.model.provider}:${telemetry.model.modelId}`;
 
-    if (telemetry.isPrimaryBranch && !timing.isToolCall && telemetry.tps !== null) {
+    if (telemetry.isPrimaryBranch && telemetry.tps !== null) {
       const currentCap = tpsCaps.get(modelKey);
       if (currentCap === undefined || telemetry.tps > currentCap) {
         tpsCaps.set(modelKey, telemetry.tps);
