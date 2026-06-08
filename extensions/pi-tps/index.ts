@@ -88,6 +88,7 @@ interface TurnTelemetry {
     messageCount: number; // assistant messages in this turn
   };
   tps: number | null; // output / (streamMs / 1000), null when burst/degenerate
+  isPrimaryBranch: boolean; // TPS came from primary-branch (reliable) measurement
   cost: {
     input: number;
     output: number;
