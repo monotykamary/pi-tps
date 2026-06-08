@@ -303,7 +303,7 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
   const MIN_STREAM_MS = 1;
   const MIN_STREAM_UPDATES = 5;
   const MIN_INTER_CHUNK_MS = 1;
-  const MIN_GENERATION_MS = 50;
+  const MIN_GENERATION_MS = 200;
   const ACTIVE_TIME_THRESHOLD_MS = 200;
   const STALL_REDUCTION_DENOM = 2;
   const STALL_DOMINANCE_RATIO = 0.85;

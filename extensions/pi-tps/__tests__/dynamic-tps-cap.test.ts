@@ -128,15 +128,15 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       messageEnd: 900,
     });
 
-    // Turn 2: tool call with fallback TPS (2 updates, 100ms generationMs)
-    // Without cap: 20 tokens / 0.055s ≈ 363 TPS (inflated)
-    // With cap: min(363, 50) = 50 TPS
+    // Turn 2: tool call with fallback TPS (2 updates, 250ms generationMs)
+    // Without cap: 20 tokens / 0.25s ≈ 80 TPS (feasible but from short window)
+    // With cap: min(80, 50) = 50 TPS
     const { appendEntrySpy, notifySpy } = driveTurn({
       turnStart: 0,
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: true,
     });
 
@@ -150,13 +150,13 @@ describe('pi-tps extension — dynamic TPS cap', () => {
   // ── Tool calls do not set the cap from fallback ─────────────────────────────
 
   it('should not let fallback-branch tool-call turns set the cap', () => {
-    // Turn 1: tool call with fallback TPS (2 updates, short generation) — should NOT set the cap
+    // Turn 1: tool call with fallback TPS — should NOT set the cap
     const { appendEntrySpy: spy1 } = driveTurn({
       turnStart: 0,
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: true,
     });
     const [, data1] = spy1.mock.calls[0];
@@ -181,7 +181,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: true,
     });
     const [, data3] = spy3.mock.calls[2];
@@ -214,7 +214,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: true,
     });
     const [, data2] = spy2.mock.calls[1];
@@ -231,7 +231,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: true,
     });
 
@@ -262,7 +262,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: false,
     });
 
@@ -378,7 +378,7 @@ describe('pi-tps extension — dynamic TPS cap', () => {
       messageStart: 100,
       firstUpdate: 100.1,
       streamUpdates: [100.15, 100.3],
-      messageEnd: 200,
+      messageEnd: 350,
       isToolCall: true,
     });
 
