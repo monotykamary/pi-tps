@@ -308,6 +308,19 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
   const STALL_REDUCTION_DENOM = 2;
   const STALL_DOMINANCE_RATIO = 0.85;
 
+  // Maximum plausible generation speed (tokens/second). Beyond this, the
+  // measured TPS is almost certainly a measurement artifact — the effective
+  // generation window is too short relative to the token volume to
+  // distinguish genuine inference from a buffer-flush dispatch of
+  // pre-generated tokens. At 10_000 TPS this is 5× the fastest known
+  // commercial inference (Cerebras ~2_000 tok/s). The gate is phrased as
+  // "extraordinary claims require extraordinary evidence": for X output
+  // tokens, the minimum reliable measurement window is X / MAX_PLAUSIBLE_TPS
+  // seconds. Below that, the volume of tokens cannot be reliably timed, and
+  // TPS is set to null. This is mathematically equivalent to nulling out
+  // TPS when computed TPS > MAX_PLAUSIBLE_TPS.
+  const MAX_PLAUSIBLE_TPS = 10_000;
+
   const streamMs =
     timing.updateCount > 0 && timing.firstStreamUpdateMs !== null
       ? timing.lastStreamUpdateMs - timing.firstStreamUpdateMs
@@ -383,6 +396,23 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
     tps = Math.round(raw * 10) / 10;
   } else {
     tps = null;
+  }
+
+  // Volume-based sanity gate: extraordinary TPS claims require
+  // proportionally longer measurement windows. When a provider emits a
+  // large volume of tokens in a short time window, the measured rate is
+  // dominated by dispatch/buffer-flush timing rather than actual inference
+  // speed. For X output tokens, the minimum reliable generation window is
+  // X / MAX_PLAUSIBLE_TPS seconds — below that, the volume of tokens cannot
+  // be reliably timed, and TPS is set to null.
+  //
+  // Mathematically equivalent to: computed TPS > MAX_PLAUSIBLE_TPS → null.
+  // But phrased as a measurement-reliability principle: the evidence
+  // (effective window duration) must be proportional to the claim (token
+  // volume ÷ inferred rate).
+  if (tps !== null && tps > MAX_PLAUSIBLE_TPS) {
+    tps = null;
+    isPrimaryBranch = false;
   }
 
   return {
