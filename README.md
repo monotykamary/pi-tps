@@ -20,7 +20,7 @@ _Originally from [badlogic/pi-mono](https://github.com/badlogic/pi-mono/blob/mai
 ## Quick start
 
 ```bash
-pi install https://github.com/monotykamary/pi-tps
+pi install npm:@monotykamary/pi-tps
 ```
 
 ## What's included
@@ -42,6 +42,12 @@ pi install https://github.com/monotykamary/pi-tps
 - **Extensible**: Emits `tps:telemetry` events so other extensions can react to telemetry
 
 ## Install
+
+```bash
+pi install npm:@monotykamary/pi-tps
+```
+
+Or install from GitHub:
 
 ```bash
 pi install https://github.com/monotykamary/pi-tps
