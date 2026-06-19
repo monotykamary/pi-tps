@@ -72,6 +72,11 @@ interface ToolExecutionStartEvent {
 /** Minimum gap between token updates to count as a stall (ms) */
 const STALL_THRESHOLD_MS = 500;
 
+/** Event name emitted by pi-neuralwatt-provider per turn with energy-billed cost data. */
+const NEURALWATT_ENERGY_EVENT = 'neuralwatt:turn-energy';
+/** Cap the per-turn billed-cost cache (turnIndex → costUsd) to avoid unbounded growth in long sessions. */
+const NEURALWATT_ENERGY_CACHE_MAX = 32;
+
 // ─── Data types ─────────────────────────────────────────────────────────────
 
 /** Structured telemetry persisted per turn in the session JSONL */
@@ -96,6 +101,15 @@ interface TurnTelemetry {
     cacheWrite: number;
     total: number;
   } | null;
+  /**
+   * Blended $/M-tokens rate shown in the notification banner: the per-turn
+   * cost divided by (totalTokens / 1_000_000). Cost source is the Neuralwatt
+   * billed cost when available (energy-based), otherwise the list-price
+   * compute cost from `cost.total`. null when neither is usable or tokens
+   * are zero. Purely derived — recomputed in composeDisplayString, not a
+   * duplicate of the cost block.
+   */
+  rateUsdPerMTokens: number | null;
   timestamp: number;
 }
 
@@ -121,6 +135,20 @@ interface TurnTiming {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Compute the blended $/M-tokens rate: costUsd / (totalTokens / 1_000_000).
+ * The single calculation backing the banner's $/M-tokens field. Returns null
+ * when the inputs can't produce a meaningful rate (zero/negative tokens,
+ * non-finite or negative cost).
+ */
+function computeRateUsdPerM(costUsd: number | null, totalTokens: number): number | null {
+  if (costUsd === null || !Number.isFinite(costUsd) || costUsd < 0) return null;
+  if (!Number.isFinite(totalTokens) || totalTokens <= 0) return null;
+  const rate = costUsd / (totalTokens / 1_000_000);
+  if (!Number.isFinite(rate) || rate < 0) return null;
+  return Math.round(rate * 100) / 100;
+}
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
   if (!message || typeof message !== 'object') return false;
@@ -236,6 +264,9 @@ function composeDisplayString(t: TurnTelemetry): string {
     const stallStr = formatDuration(t.timing.stallMs / 1000);
     parts.push(`stall ${stallStr}×${t.timing.stallCount}`);
   }
+  if (t.rateUsdPerMTokens != null) {
+    parts.push(`$${t.rateUsdPerMTokens.toFixed(2)}/M`);
+  }
   return parts.join(' · ');
 }
 
@@ -243,7 +274,11 @@ function composeDisplayString(t: TurnTelemetry): string {
  * Build structured TurnTelemetry from accumulated turn timing.
  * Returns null if the turn had no meaningful LLM output.
  */
-function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | null {
+function buildTelemetry(
+  timing: TurnTiming,
+  turnEndMs: number,
+  billedCost: number | null = null
+): TurnTelemetry | null {
   let input = 0;
   let output = 0;
   let cacheRead = 0;
@@ -415,6 +450,13 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
     isPrimaryBranch = false;
   }
 
+  // Single blended $/M-tokens rate for the banner. Cost source: Neuralwatt's
+  // billed cost when present (energy-based, what the user actually pays),
+  // otherwise the list-price compute cost from message.usage.cost. Never both
+  // — billedCost wins outright when present, so there's no double-counting.
+  const effectiveCost = billedCost ?? (hasCost ? costTotal : null);
+  const rateUsdPerMTokens = computeRateUsdPerM(effectiveCost, totalTokens);
+
   return {
     model,
     tokens: { input, output, cacheRead, cacheWrite, total: totalTokens },
@@ -438,6 +480,7 @@ function buildTelemetry(timing: TurnTiming, turnEndMs: number): TurnTelemetry | 
           total: costTotal,
         }
       : null,
+    rateUsdPerMTokens,
     timestamp: Date.now(),
   };
 }
@@ -454,6 +497,34 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // Cached session entries for argument completion (captured on session_start / session_tree)
   let cachedEntries: Array<{ type?: string; customType?: string; data?: unknown }> = [];
+
+  // ── Neuralwatt per-turn billed-cost integration ─────────────────────────
+  // pi-neuralwatt-provider emits NEURALWATT_ENERGY_EVENT in its turn_end handler
+  // (after its tee reader drains) with { costUsd, energyJoules, turnIndex }. We stash
+  // only the one number we need — billed costUsd — keyed by turnIndex, and read it
+  // synchronously in our own turn_end. pi awaits turn_end handlers sequentially in
+  // registration order, so if the neuralwatt provider was registered before us the
+  // event has already fired and the cache hit is immediate; if after us we miss it
+  // for that one turn and fall back to the list-price compute rate (the neuralwatt
+  // widget still shows billing separately). Zero latency, no awaiting, no duplicate
+  // capture — the raw energy/cost records stay solely in the neuralwatt provider's
+  // own session entries. Non-Neuralwatt turns never emit, so this stays empty.
+  const neuralwattBilledCostByTurn = new Map<number, number>();
+
+  pi.events?.on(NEURALWATT_ENERGY_EVENT, (payload: unknown) => {
+    if (!payload || typeof payload !== 'object') return;
+    const p = payload as Record<string, unknown>;
+    const turnIndex = typeof p.turnIndex === 'number' ? p.turnIndex : null;
+    const costUsd = typeof p.costUsd === 'number' ? p.costUsd : null;
+    if (turnIndex === null || costUsd === null) return; // require turnIndex correlation
+    neuralwattBilledCostByTurn.set(turnIndex, costUsd);
+    // Bound the cache (oldest = lowest turnIndex)
+    if (neuralwattBilledCostByTurn.size > NEURALWATT_ENERGY_CACHE_MAX) {
+      let oldest = Infinity;
+      for (const k of neuralwattBilledCostByTurn.keys()) if (k < oldest) oldest = k;
+      if (oldest !== Infinity) neuralwattBilledCostByTurn.delete(oldest);
+    }
+  });
 
   // ── Rehydration ─────────────────────────────────────────────────────────
 
@@ -614,15 +685,28 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // ── Persist telemetry ───────────────────────────────────────────────────
 
-  // Calculate, display, and persist telemetry at the end of each LLM turn
-  pi.on('turn_end', (_event: TurnEndEvent, ctx: ExtensionContext) => {
+  // Calculate, display, and persist telemetry at the end of each LLM turn.
+  // Synchronous: the Neuralwatt billed cost (if any) was stashed by our
+  // NEURALWATT_ENERGY_EVENT listener, keyed by turnIndex, and is read here
+  // synchronously. No awaiting, no added latency to turn dispatch.
+  pi.on('turn_end', (event: TurnEndEvent, ctx: ExtensionContext) => {
     if (!currentTiming) return;
 
     const timing = currentTiming;
     currentTiming = null;
 
     const turnEndMs = performance.now();
-    const telemetry = buildTelemetry(timing, turnEndMs);
+
+    // Pick the effective cost for the blended $/M-tokens rate: Neuralwatt's
+    // billed cost when present (cache hit), otherwise the list-price compute
+    // cost from message.usage.cost. The neuralwatt provider emits its event
+    // in its own turn_end, which runs before or after ours depending on load
+    // order — a cache miss here just falls back to the compute rate for this
+    // one turn (no double-counting: only one source contributes to the rate).
+    const billedCost = neuralwattBilledCostByTurn.get(event.turnIndex) ?? null;
+    neuralwattBilledCostByTurn.delete(event.turnIndex);
+
+    const telemetry = buildTelemetry(timing, turnEndMs, billedCost);
     if (!telemetry) return;
 
     // ── Dynamic TPS cap ────────────────────────────────────────────────

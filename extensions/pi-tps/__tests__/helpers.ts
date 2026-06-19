@@ -77,6 +77,8 @@ export interface TestFixture {
   notifySpy: ReturnType<typeof vi.fn>;
   appendEntrySpy: ReturnType<typeof vi.fn>;
   eventsEmitSpy: ReturnType<typeof vi.fn>;
+  /** Emit an event on the mock event bus, dispatching to registered listeners (and the emit spy). */
+  emitEvent: (event: string, payload: unknown) => void;
   registerCommandSpy: ReturnType<typeof vi.fn>;
   mockEntries: Array<{ type?: string; role?: string; customType?: string; data?: unknown }>;
   mockCtx: ExtensionContext;
@@ -123,6 +125,19 @@ export function createTestFixture(): TestFixture {
   } as any as ExtensionContext;
 
   const eventsEmitSpy = vi.fn();
+  // Real event bus: listeners registered via events.on are dispatched on emit.
+  // eventsEmitSpy still captures every emit for assertions (e.g. 'tps:telemetry').
+  const eventListeners = new Map<string, ((payload: unknown) => void)[]>();
+  const dispatchEvent = (event: string, payload: unknown) => {
+    eventsEmitSpy(event, payload);
+    for (const listener of eventListeners.get(event) ?? []) {
+      try {
+        listener(payload);
+      } catch {
+        // listener errors shouldn't break emit dispatch in tests
+      }
+    }
+  };
 
   const mockPi: Partial<ExtensionAPI> = {
     on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
@@ -131,7 +146,14 @@ export function createTestFixture(): TestFixture {
     }),
     appendEntry: appendEntrySpy,
     registerCommand: registerCommandSpy,
-    events: { emit: eventsEmitSpy, on: vi.fn() },
+    events: {
+      emit: dispatchEvent,
+      on: vi.fn((event: string, listener: (payload: unknown) => void) => {
+        const list = eventListeners.get(event) ?? [];
+        list.push(listener);
+        eventListeners.set(event, list);
+      }),
+    } as any,
   };
 
   return {
@@ -141,6 +163,7 @@ export function createTestFixture(): TestFixture {
     notifySpy,
     appendEntrySpy,
     eventsEmitSpy,
+    emitEvent: dispatchEvent,
     registerCommandSpy,
     mockEntries,
     mockCtx,
