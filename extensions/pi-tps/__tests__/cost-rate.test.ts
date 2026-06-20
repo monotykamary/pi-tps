@@ -175,6 +175,76 @@ describe('pi-tps extension — blended $/M-tokens rate', () => {
     expect(banner).toContain('$4.00/M');
   });
 
+  it('corrects the banner + persisted entry when the energy event arrives late', async () => {
+    // Provider loads AFTER pi-tps: our turn_end runs first on the list-price
+    // fallback, then the provider's turn_end emits the energy event, which
+    // must retroactively correct the rate without a second turn_end.
+    const message = makeMessageWithCost({
+      input: 1000,
+      output: 1000,
+      costTotal: 0.008, // list price: $4.00/M; billed: $3.00/M
+      provider: 'neuralwatt',
+      model: 'moonshotai/Kimi-K2.5',
+    });
+
+    await runBurstTurn(fixture, message, 0);
+
+    const { notifySpy, appendEntrySpy } = fixture;
+    // Initially committed on the list-price fallback.
+    expect(appendEntrySpy.mock.calls[0][0]).toBe('tps');
+    expect(appendEntrySpy.mock.calls[0][1].rateUsdPerMTokens).toBe(4.0);
+    expect(notifySpy.mock.calls[0][0]).toContain('$4.00/M');
+
+    // Provider's turn_end fires the energy event after ours.
+    fixture.emitEvent('neuralwatt:turn-energy', {
+      costUsd: 0.006, // $3.00/M for 2000 tokens
+      energyJoules: 21.6,
+      turnIndex: 0,
+    });
+
+    // A corrected `tps` entry is appended in place of the list-price one.
+    expect(appendEntrySpy.mock.calls).toHaveLength(2);
+    expect(appendEntrySpy.mock.calls[1][0]).toBe('tps');
+    expect(appendEntrySpy.mock.calls[1][1].rateUsdPerMTokens).toBe(3.0);
+
+    // Banner is refreshed to the billed rate.
+    const lastBanner = notifySpy.mock.calls.at(-1)![0] as string;
+    expect(lastBanner).toContain('$3.00/M');
+    expect(lastBanner).not.toContain('$4.00/M');
+  });
+
+  it('does not double-correct a turn already billed at commit time', async () => {
+    // Provider loads BEFORE pi-tps: the event fires first, our turn_end reads
+    // it from the live cache (billedApplied=true), so no late correction.
+    const message = makeMessageWithCost({
+      input: 1000,
+      output: 1000,
+      costTotal: 0.008,
+      provider: 'neuralwatt',
+      model: 'moonshotai/Kimi-K2.5',
+    });
+
+    fixture.emitEvent('neuralwatt:turn-energy', {
+      costUsd: 0.006,
+      energyJoules: 21.6,
+      turnIndex: 0,
+    });
+    await runBurstTurn(fixture, message, 0);
+
+    // A stray duplicate event must not append a second corrected entry.
+    fixture.emitEvent('neuralwatt:turn-energy', {
+      costUsd: 0.006,
+      energyJoules: 21.6,
+      turnIndex: 0,
+    });
+
+    const { appendEntrySpy, notifySpy } = fixture;
+    expect(appendEntrySpy.mock.calls.filter((c) => c[0] === 'tps')).toHaveLength(1);
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const banner = notifySpy.mock.calls[0][0] as string;
+    expect(banner).toContain('$3.00/M');
+  });
+
   it('ignores neuralwatt:turn-energy payloads lacking a numeric turnIndex', async () => {
     // Defensive: malformed event must not pollute the cache.
     fixture.emitEvent('neuralwatt:turn-energy', { costUsd: 0.006, energyJoules: 21.6 }); // no turnIndex

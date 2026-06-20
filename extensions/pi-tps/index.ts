@@ -546,6 +546,18 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // own session entries. Non-Neuralwatt turns never emit, so this stays empty.
   const neuralwattBilledCostByTurn = new Map<number, number>();
 
+  // Tracks the most recently committed turn so a late-arriving
+  // `neuralwatt:turn-energy` event (provider loaded AFTER us) can retroactively
+  // correct a turn that we already persisted with the list-price fallback.
+  // Load-order-independent: when the provider loads before us the live cache
+  // hits and `billedApplied` is already true, so this never fires.
+  let lastCommittedTurn: {
+    turnIndex: number;
+    telemetry: TurnTelemetry;
+    billedApplied: boolean;
+    ctx: ExtensionContext;
+  } | null = null;
+
   pi.events?.on(NEURALWATT_ENERGY_EVENT, (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
     const p = payload as Record<string, unknown>;
@@ -553,6 +565,36 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const costUsd = typeof p.costUsd === 'number' ? p.costUsd : null;
     if (turnIndex === null || costUsd === null) return; // require turnIndex correlation
     neuralwattBilledCostByTurn.set(turnIndex, costUsd);
+
+    // Late-arrival correction: the event reached us after our turn_end already
+    // committed this turn on the list-price fallback. Recompute the blended
+    // rate from the billed cost, persist a corrected `tps` entry (which later
+    // resume/export reads in place of the stale list-price one), and refresh
+    // the banner — but only if no newer turn is mid-flight (currentTiming set
+    // means a new turn is streaming; updating the banner then would be
+    // misleading). Idempotent: once `billedApplied` flips true we never
+    // re-correct, so repeated or duplicate events are safe.
+    const committed = lastCommittedTurn;
+    if (
+      committed &&
+      !committed.billedApplied &&
+      committed.turnIndex === turnIndex &&
+      !Number.isNaN(costUsd)
+    ) {
+      const totalTokens = committed.telemetry.tokens.total;
+      const correctedRate = computeRateUsdPerM(costUsd, totalTokens);
+      if (correctedRate !== null && correctedRate !== committed.telemetry.rateUsdPerMTokens) {
+        const corrected = { ...committed.telemetry, rateUsdPerMTokens: correctedRate };
+        committed.telemetry = corrected;
+        committed.billedApplied = true;
+        pi.appendEntry('tps', corrected);
+        pi.events?.emit('tps:telemetry', corrected);
+        cachedEntries.push({ type: 'custom', customType: 'tps' });
+        if (committed.ctx.hasUI && !currentTiming) {
+          committed.ctx.ui.notify(composeDisplayString(corrected), 'info');
+        }
+      }
+    }
     // Bound the cache (oldest = lowest turnIndex)
     if (neuralwattBilledCostByTurn.size > NEURALWATT_ENERGY_CACHE_MAX) {
       let oldest = Infinity;
@@ -771,6 +813,17 @@ export default function tpsExtension(pi: ExtensionAPI) {
         telemetry.tps = null;
       }
     }
+
+    // Record this turn so a late-arriving neuralwatt:turn-energy event
+    // (provider loaded after us) can retroactively correct the rate. Billed
+    // cost wins when present, so a turn already billed at commit time is
+    // never re-corrected.
+    lastCommittedTurn = {
+      turnIndex: event.turnIndex,
+      telemetry,
+      billedApplied: billedCost !== null,
+      ctx,
+    };
 
     // Persist structured telemetry to session for export and rehydration
     pi.appendEntry('tps', telemetry);
