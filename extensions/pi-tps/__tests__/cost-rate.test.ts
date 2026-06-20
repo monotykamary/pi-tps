@@ -249,4 +249,86 @@ describe('pi-tps extension — blended $/M-tokens rate', () => {
     const banner = notifySpy.mock.calls[0][0] as string;
     expect(banner).not.toMatch(/\$.*\/M/);
   });
+
+  it('falls back to a persisted neuralwatt-energy entry when the live event is missed', async () => {
+    const now = Date.now();
+    const message = makeMessageWithCost({
+      input: 1000,
+      output: 1000,
+      costTotal: 0.008, // list price: $4.00/M
+      provider: 'neuralwatt',
+      model: 'moonshotai/Kimi-K2.5',
+    });
+
+    // Provider appended its energy entry before pi-tps handled turn_end.
+    fixture.mockEntries.push({
+      type: 'custom',
+      customType: 'neuralwatt-energy',
+      data: { energy_joules: 21.6, cost_usd: 0.006 }, // $3.00/M for 2000 tokens
+      timestamp: now,
+    });
+
+    const { handlers, notifySpy, appendEntrySpy } = fixture;
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: now - 100 });
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message });
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message,
+      assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    });
+    handlers['message_end']?.({ type: 'message_end', message });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message, toolResults: [] },
+      fixture.mockCtx
+    );
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const banner = notifySpy.mock.calls[0][0] as string;
+    expect(banner).toContain('$3.00/M');
+    expect(banner).not.toContain('$4.00/M');
+
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.rateUsdPerMTokens).toBe(3.0);
+  });
+
+  it('ignores stale neuralwatt-energy entries from before this turn', async () => {
+    const now = Date.now();
+    const message = makeMessageWithCost({
+      input: 1000,
+      output: 1000,
+      costTotal: 0.008, // list price: $4.00/M
+      provider: 'neuralwatt',
+      model: 'moonshotai/Kimi-K2.5',
+    });
+
+    fixture.mockEntries.push({
+      type: 'custom',
+      customType: 'neuralwatt-energy',
+      data: { energy_joules: 1, cost_usd: 9999 }, // absurd cost, should be ignored
+      timestamp: now - 1000,
+    });
+
+    const { handlers, notifySpy } = fixture;
+    handlers['turn_start']?.({ type: 'turn_start', turnIndex: 0, timestamp: now });
+    await tick(50);
+    handlers['message_start']?.({ type: 'message_start', message });
+    await tick(50);
+    handlers['message_update']?.({
+      type: 'message_update',
+      message,
+      assistantMessageEvent: { type: 'text_delta', delta: 'H' },
+    });
+    handlers['message_end']?.({ type: 'message_end', message });
+    handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex: 0, message, toolResults: [] },
+      fixture.mockCtx
+    );
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const banner = notifySpy.mock.calls[0][0] as string;
+    expect(banner).toContain('$4.00/M');
+    expect(banner).not.toContain('$9999');
+  });
 });

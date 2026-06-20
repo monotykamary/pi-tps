@@ -132,6 +132,7 @@ interface TurnTiming {
   messageCount: number;
   isToolCall: boolean; // tool_execution_start fired during this turn
   isPrimaryBranch: boolean; // TPS came from primary-branch (reliable) measurement
+  turnStartTimestamp: number; // wall-clock ms at turn_start, for correlating session energy entries
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -148,6 +149,40 @@ function computeRateUsdPerM(costUsd: number | null, totalTokens: number): number
   const rate = costUsd / (totalTokens / 1_000_000);
   if (!Number.isFinite(rate) || rate < 0) return null;
   return Math.round(rate * 100) / 100;
+}
+
+/**
+ * Fallback: find a Neuralwatt energy entry that was persisted in this session
+ * during the current turn. This covers the case where pi-neuralwatt-provider
+ * loads before pi-tps, so the energy entry exists before our turn_end runs,
+ * but the live event cache missed (e.g. malformed payload, event ordering, or
+ * a race).
+ *
+ * Scans backward from the most recent entry and requires the entry timestamp
+ * to be >= turnStartTimestamp so a previous turn's energy data is not reused.
+ */
+function findEnergyCostFromSession(
+  ctx: ExtensionContext,
+  turnStartTimestamp: number
+): number | null {
+  if (!ctx.sessionManager?.getEntries) return null;
+
+  const entries = ctx.sessionManager.getEntries();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.type !== 'custom' || e.customType !== 'neuralwatt-energy') continue;
+
+    const entryTimestamp = typeof e.timestamp === 'number' ? e.timestamp : 0;
+    if (entryTimestamp < turnStartTimestamp) return null;
+
+    const data = e.data as Record<string, unknown> | null | undefined;
+    if (!data) continue;
+
+    const costUsd = typeof data.cost_usd === 'number' ? data.cost_usd : null;
+    if (costUsd !== null && Number.isFinite(costUsd) && costUsd >= 0) return costUsd;
+  }
+
+  return null;
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -579,6 +614,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
   pi.on('turn_start', (_event: TurnStartEvent) => {
     currentTiming = {
       turnStartMs: performance.now(),
+      turnStartTimestamp: typeof _event.timestamp === 'number' ? _event.timestamp : Date.now(),
       lastUpdateMs: performance.now(),
       firstTokenMs: null,
       currentMessageStartMs: null,
@@ -698,13 +734,18 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const turnEndMs = performance.now();
 
     // Pick the effective cost for the blended $/M-tokens rate: Neuralwatt's
-    // billed cost when present (cache hit), otherwise the list-price compute
-    // cost from message.usage.cost. The neuralwatt provider emits its event
-    // in its own turn_end, which runs before or after ours depending on load
-    // order — a cache miss here just falls back to the compute rate for this
-    // one turn (no double-counting: only one source contributes to the rate).
-    const billedCost = neuralwattBilledCostByTurn.get(event.turnIndex) ?? null;
+    // billed cost when present, otherwise the list-price compute cost from
+    // message.usage.cost. The live event is the primary source; if it missed,
+    // we read the persisted neuralwatt-energy session entry. Only if neither
+    // energy source is available do we fall back to the compute rate.
+    // Prefer the live energy event, fall back to the persisted energy entry,
+    // and finally to the list-price compute cost.
+    let billedCost = neuralwattBilledCostByTurn.get(event.turnIndex) ?? null;
     neuralwattBilledCostByTurn.delete(event.turnIndex);
+
+    if (billedCost === null && timing.turnStartTimestamp) {
+      billedCost = findEnergyCostFromSession(ctx, timing.turnStartTimestamp);
+    }
 
     const telemetry = buildTelemetry(timing, turnEndMs, billedCost);
     if (!telemetry) return;
