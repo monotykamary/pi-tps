@@ -52,7 +52,8 @@ function makeMessageWithCost(opts: {
 async function runBurstTurn(
   fixture: ReturnType<typeof createTestFixture>,
   message: AssistantMessage,
-  turnIndex = 0
+  turnIndex = 0,
+  beforeTurnEnd?: () => void
 ) {
   const { handlers, mockCtx } = fixture;
   handlers['turn_start']?.({ type: 'turn_start', turnIndex, timestamp: Date.now() });
@@ -65,6 +66,7 @@ async function runBurstTurn(
     assistantMessageEvent: { type: 'text_delta', delta: 't' },
   });
   handlers['message_end']?.({ type: 'message_end', message });
+  beforeTurnEnd?.();
   handlers['turn_end']?.({ type: 'turn_end', turnIndex, message, toolResults: [] }, mockCtx);
 }
 
@@ -108,14 +110,14 @@ describe('pi-tps extension — blended $/M-tokens rate', () => {
     });
 
     // Simulate the neuralwatt provider's turn_end running BEFORE ours: it emits
-    // the per-turn energy event, which our listener stashes keyed by turnIndex.
-    fixture.emitEvent('neuralwatt:turn-energy', {
-      costUsd: 0.006,
-      energyJoules: 21.6,
-      turnIndex: 0,
+    // the per-turn energy event after streaming but before pi-tps handles turn_end.
+    await runBurstTurn(fixture, message, 0, () => {
+      fixture.emitEvent('neuralwatt:turn-energy', {
+        costUsd: 0.006,
+        energyJoules: 21.6,
+        turnIndex: 0,
+      });
     });
-
-    await runBurstTurn(fixture, message, 0);
 
     const { notifySpy, appendEntrySpy } = fixture;
     expect(notifySpy).toHaveBeenCalledOnce();
@@ -155,6 +157,102 @@ describe('pi-tps extension — blended $/M-tokens rate', () => {
     const [, data] = appendEntrySpy.mock.calls[0];
     expect(data.rateUsdPerMTokens).toBeNull();
     expect(data.cost).toBeNull();
+  });
+
+  it('omits the rate when pi reports an all-zero cost block for an unpriced model', async () => {
+    const message = makeMessageWithCost({
+      input: 500,
+      output: 500,
+      costTotal: 0,
+      provider: 'makora',
+      model: 'zai-org/GLM-5.2-NVFP4',
+    });
+
+    await runBurstTurn(fixture, message);
+
+    const { appendEntrySpy, notifySpy } = fixture;
+    const [, data] = appendEntrySpy.mock.calls[0];
+    expect(data.cost).toBeNull();
+    expect(data.rateUsdPerMTokens).toBeNull();
+    expect(notifySpy.mock.calls[0][0]).not.toMatch(/\$.*\/M/);
+  });
+
+  it('does not reuse a late billed cost after /tree when a turn index repeats', async () => {
+    const neuralwattMessage = makeMessageWithCost({
+      input: 1178,
+      output: 1235,
+      costTotal: 0.0102352,
+      provider: 'neuralwatt',
+      model: 'glm-5.2-short',
+    });
+    neuralwattMessage.usage.cacheRead = 8192;
+    neuralwattMessage.usage.totalTokens = 10605;
+
+    await runBurstTurn(fixture, neuralwattMessage, 2);
+    fixture.emitEvent('neuralwatt:turn-energy', {
+      costUsd: 0.00116,
+      energyJoules: 835.2,
+      turnIndex: 2,
+    });
+
+    fixture.handlers['session_tree']?.(
+      { type: 'session_tree', newLeafId: null, oldLeafId: 'old-leaf' },
+      fixture.mockCtx
+    );
+
+    const unpricedMessage = makeMessageWithCost({
+      input: 8460,
+      output: 717,
+      costTotal: 0,
+      provider: 'makora',
+      model: 'zai-org/GLM-5.2-NVFP4',
+    });
+    unpricedMessage.usage.cacheRead = 1216;
+    unpricedMessage.usage.totalTokens = 10393;
+
+    await runBurstTurn(fixture, unpricedMessage, 2);
+
+    const latestTelemetry = fixture.appendEntrySpy.mock.calls.at(-1)![1];
+    expect(latestTelemetry.model).toEqual({
+      provider: 'makora',
+      modelId: 'zai-org/GLM-5.2-NVFP4',
+    });
+    expect(latestTelemetry.cost).toBeNull();
+    expect(latestTelemetry.rateUsdPerMTokens).toBeNull();
+
+    const latestBanner = fixture.notifySpy.mock.calls.at(-1)![0] as string;
+    expect(latestBanner).not.toContain('$0.11/M');
+    expect(latestBanner).not.toMatch(/\$.*\/M/);
+  });
+
+  it('does not apply an early current-turn event to a previous run with the same index', async () => {
+    const previousMessage = makeMessageWithCost({
+      input: 1000,
+      output: 1000,
+      costTotal: 0.008,
+    });
+    await runBurstTurn(fixture, previousMessage, 0);
+
+    const currentMessage = makeMessageWithCost({
+      input: 1000,
+      output: 1000,
+      costTotal: 0.01,
+      provider: 'neuralwatt',
+      model: 'glm-5.2',
+    });
+
+    await runBurstTurn(fixture, currentMessage, 0, () => {
+      fixture.emitEvent('neuralwatt:turn-energy', {
+        costUsd: 0.006,
+        energyJoules: 21.6,
+        turnIndex: 0,
+      });
+      expect(fixture.appendEntrySpy).toHaveBeenCalledTimes(1);
+    });
+
+    expect(fixture.appendEntrySpy).toHaveBeenCalledTimes(2);
+    const latestTelemetry = fixture.appendEntrySpy.mock.calls.at(-1)![1];
+    expect(latestTelemetry.rateUsdPerMTokens).toBe(3);
   });
 
   it('falls back to list-price rate when billed-cost event misses (out-of-order load)', async () => {
@@ -224,12 +322,13 @@ describe('pi-tps extension — blended $/M-tokens rate', () => {
       model: 'moonshotai/Kimi-K2.5',
     });
 
-    fixture.emitEvent('neuralwatt:turn-energy', {
-      costUsd: 0.006,
-      energyJoules: 21.6,
-      turnIndex: 0,
+    await runBurstTurn(fixture, message, 0, () => {
+      fixture.emitEvent('neuralwatt:turn-energy', {
+        costUsd: 0.006,
+        energyJoules: 21.6,
+        turnIndex: 0,
+      });
     });
-    await runBurstTurn(fixture, message, 0);
 
     // A stray duplicate event must not append a second corrected entry.
     fixture.emitEvent('neuralwatt:turn-energy', {

@@ -74,8 +74,6 @@ const STALL_THRESHOLD_MS = 500;
 
 /** Event name emitted by pi-neuralwatt-provider per turn with energy-billed cost data. */
 const NEURALWATT_ENERGY_EVENT = 'neuralwatt:turn-energy';
-/** Cap the per-turn billed-cost cache (turnIndex → costUsd) to avoid unbounded growth in long sessions. */
-const NEURALWATT_ENERGY_CACHE_MAX = 32;
 
 // ─── Data types ─────────────────────────────────────────────────────────────
 
@@ -115,6 +113,7 @@ interface TurnTelemetry {
 
 /** In-memory state accumulated during one LLM turn */
 interface TurnTiming {
+  turnIndex: number;
   turnStartMs: number;
   lastUpdateMs: number;
   firstTokenMs: number | null;
@@ -489,7 +488,11 @@ function buildTelemetry(
   // billed cost when present (energy-based, what the user actually pays),
   // otherwise the list-price compute cost from message.usage.cost. Never both
   // — billedCost wins outright when present, so there's no double-counting.
-  const effectiveCost = billedCost ?? (hasCost ? costTotal : null);
+  // Pi represents models without pricing with an all-zero cost block. Treat
+  // that as unavailable rather than displaying a misleading $0.00/M rate. An
+  // explicit billed cost remains valid even when it is zero.
+  const listPriceCost = hasCost && Number.isFinite(costTotal) && costTotal > 0 ? costTotal : null;
+  const effectiveCost = billedCost ?? listPriceCost;
   const rateUsdPerMTokens = computeRateUsdPerM(effectiveCost, totalTokens);
 
   return {
@@ -506,15 +509,16 @@ function buildTelemetry(
     },
     tps,
     isPrimaryBranch,
-    cost: hasCost
-      ? {
-          input: costInput,
-          output: costOutput,
-          cacheRead: costCacheRead,
-          cacheWrite: costCacheWrite,
-          total: costTotal,
-        }
-      : null,
+    cost:
+      listPriceCost !== null
+        ? {
+            input: costInput,
+            output: costOutput,
+            cacheRead: costCacheRead,
+            cacheWrite: costCacheWrite,
+            total: costTotal,
+          }
+        : null,
     rateUsdPerMTokens,
     timestamp: Date.now(),
   };
@@ -533,24 +537,12 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // Cached session entries for argument completion (captured on session_start / session_tree)
   let cachedEntries: Array<{ type?: string; customType?: string; data?: unknown }> = [];
 
-  // ── Neuralwatt per-turn billed-cost integration ─────────────────────────
-  // pi-neuralwatt-provider emits NEURALWATT_ENERGY_EVENT in its turn_end handler
-  // (after its tee reader drains) with { costUsd, energyJoules, turnIndex }. We stash
-  // only the one number we need — billed costUsd — keyed by turnIndex, and read it
-  // synchronously in our own turn_end. pi awaits turn_end handlers sequentially in
-  // registration order, so if the neuralwatt provider was registered before us the
-  // event has already fired and the cache hit is immediate; if after us we miss it
-  // for that one turn and fall back to the list-price compute rate (the neuralwatt
-  // widget still shows billing separately). Zero latency, no awaiting, no duplicate
-  // capture — the raw energy/cost records stay solely in the neuralwatt provider's
-  // own session entries. Non-Neuralwatt turns never emit, so this stays empty.
-  const neuralwattBilledCostByTurn = new Map<number, number>();
+  // pi-neuralwatt-provider emits billed cost during its turn_end handler. Keep
+  // an early event only for the active turn; a late event corrects only the
+  // turn that was just committed. turnIndex resets to zero on every agent run,
+  // so billed costs must never survive beyond either of those scopes.
+  let pendingNeuralwattBilledCost: { turnIndex: number; costUsd: number } | null = null;
 
-  // Tracks the most recently committed turn so a late-arriving
-  // `neuralwatt:turn-energy` event (provider loaded AFTER us) can retroactively
-  // correct a turn that we already persisted with the list-price fallback.
-  // Load-order-independent: when the provider loads before us the live cache
-  // hits and `billedApplied` is already true, so this never fires.
   let lastCommittedTurn: {
     turnIndex: number;
     telemetry: TurnTelemetry;
@@ -563,43 +555,34 @@ export default function tpsExtension(pi: ExtensionAPI) {
     const p = payload as Record<string, unknown>;
     const turnIndex = typeof p.turnIndex === 'number' ? p.turnIndex : null;
     const costUsd = typeof p.costUsd === 'number' ? p.costUsd : null;
-    if (turnIndex === null || costUsd === null) return; // require turnIndex correlation
-    neuralwattBilledCostByTurn.set(turnIndex, costUsd);
-
-    // Late-arrival correction: the event reached us after our turn_end already
-    // committed this turn on the list-price fallback. Recompute the blended
-    // rate from the billed cost, persist a corrected `tps` entry (which later
-    // resume/export reads in place of the stale list-price one), and refresh
-    // the banner — but only if no newer turn is mid-flight (currentTiming set
-    // means a new turn is streaming; updating the banner then would be
-    // misleading). Idempotent: once `billedApplied` flips true we never
-    // re-correct, so repeated or duplicate events are safe.
-    const committed = lastCommittedTurn;
-    if (
-      committed &&
-      !committed.billedApplied &&
-      committed.turnIndex === turnIndex &&
-      !Number.isNaN(costUsd)
-    ) {
-      const totalTokens = committed.telemetry.tokens.total;
-      const correctedRate = computeRateUsdPerM(costUsd, totalTokens);
-      if (correctedRate !== null && correctedRate !== committed.telemetry.rateUsdPerMTokens) {
-        const corrected = { ...committed.telemetry, rateUsdPerMTokens: correctedRate };
-        committed.telemetry = corrected;
-        committed.billedApplied = true;
-        pi.appendEntry('tps', corrected);
-        pi.events?.emit('tps:telemetry', corrected);
-        cachedEntries.push({ type: 'custom', customType: 'tps' });
-        if (committed.ctx.hasUI && !currentTiming) {
-          committed.ctx.ui.notify(composeDisplayString(corrected), 'info');
-        }
-      }
+    if (turnIndex === null || costUsd === null || !Number.isFinite(costUsd) || costUsd < 0) {
+      return;
     }
-    // Bound the cache (oldest = lowest turnIndex)
-    if (neuralwattBilledCostByTurn.size > NEURALWATT_ENERGY_CACHE_MAX) {
-      let oldest = Infinity;
-      for (const k of neuralwattBilledCostByTurn.keys()) if (k < oldest) oldest = k;
-      if (oldest !== Infinity) neuralwattBilledCostByTurn.delete(oldest);
+
+    // Provider loaded before pi-tps: turn_end has not reached us yet.
+    if (currentTiming) {
+      if (currentTiming.turnIndex === turnIndex) {
+        pendingNeuralwattBilledCost = { turnIndex, costUsd };
+      }
+      return;
+    }
+
+    // Provider loaded after pi-tps: correct the turn we just committed. Do not
+    // cache this event; the same turnIndex can belong to the next agent run.
+    const committed = lastCommittedTurn;
+    if (!committed || committed.billedApplied || committed.turnIndex !== turnIndex) return;
+
+    committed.billedApplied = true;
+    const correctedRate = computeRateUsdPerM(costUsd, committed.telemetry.tokens.total);
+    if (correctedRate === null || correctedRate === committed.telemetry.rateUsdPerMTokens) return;
+
+    const corrected = { ...committed.telemetry, rateUsdPerMTokens: correctedRate };
+    committed.telemetry = corrected;
+    pi.appendEntry('tps', corrected);
+    pi.events?.emit('tps:telemetry', corrected);
+    cachedEntries.push({ type: 'custom', customType: 'tps' });
+    if (committed.ctx.hasUI) {
+      committed.ctx.ui.notify(composeDisplayString(corrected), 'info');
     }
   });
 
@@ -613,7 +596,7 @@ export default function tpsExtension(pi: ExtensionAPI) {
    */
   function restoreTPSNotification(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
-    const entries = cachedEntries.length > 0 ? cachedEntries : ctx.sessionManager.getEntries();
+    const entries = ctx.sessionManager.getBranch();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
@@ -646,6 +629,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // Restore notification after /tree navigation (same session, different branch)
   pi.on('session_tree', (_event: SessionTreeEvent, ctx: ExtensionContext) => {
+    pendingNeuralwattBilledCost = null;
+    lastCommittedTurn = null;
     cachedEntries = ctx.sessionManager.getEntries();
     restoreTPSNotification(ctx);
   });
@@ -654,7 +639,10 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // Track when a turn starts (request sent to LLM)
   pi.on('turn_start', (_event: TurnStartEvent) => {
+    pendingNeuralwattBilledCost = null;
+    lastCommittedTurn = null;
     currentTiming = {
+      turnIndex: _event.turnIndex,
       turnStartMs: performance.now(),
       turnStartTimestamp: typeof _event.timestamp === 'number' ? _event.timestamp : Date.now(),
       lastUpdateMs: performance.now(),
@@ -764,9 +752,8 @@ export default function tpsExtension(pi: ExtensionAPI) {
   // ── Persist telemetry ───────────────────────────────────────────────────
 
   // Calculate, display, and persist telemetry at the end of each LLM turn.
-  // Synchronous: the Neuralwatt billed cost (if any) was stashed by our
-  // NEURALWATT_ENERGY_EVENT listener, keyed by turnIndex, and is read here
-  // synchronously. No awaiting, no added latency to turn dispatch.
+  // The Neuralwatt listener stores an early billed cost only while this exact
+  // turn is active, so the handoff remains synchronous and adds no latency.
   pi.on('turn_end', (event: TurnEndEvent, ctx: ExtensionContext) => {
     if (!currentTiming) return;
 
@@ -782,8 +769,11 @@ export default function tpsExtension(pi: ExtensionAPI) {
     // energy source is available do we fall back to the compute rate.
     // Prefer the live energy event, fall back to the persisted energy entry,
     // and finally to the list-price compute cost.
-    let billedCost = neuralwattBilledCostByTurn.get(event.turnIndex) ?? null;
-    neuralwattBilledCostByTurn.delete(event.turnIndex);
+    let billedCost =
+      pendingNeuralwattBilledCost?.turnIndex === event.turnIndex
+        ? pendingNeuralwattBilledCost.costUsd
+        : null;
+    pendingNeuralwattBilledCost = null;
 
     if (billedCost === null && timing.turnStartTimestamp) {
       billedCost = findEnergyCostFromSession(ctx, timing.turnStartTimestamp);

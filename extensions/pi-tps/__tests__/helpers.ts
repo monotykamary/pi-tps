@@ -108,7 +108,7 @@ export function createTestFixture(): TestFixture {
     ui: { notify: notifySpy } as any,
     sessionManager: {
       getEntries: vi.fn().mockReturnValue(mockEntries),
-      getBranch: vi.fn(),
+      getBranch: vi.fn().mockReturnValue(mockEntries),
       getSessionId: vi.fn(),
     },
     modelRegistry: undefined as any,

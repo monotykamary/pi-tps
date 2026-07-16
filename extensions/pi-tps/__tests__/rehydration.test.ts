@@ -175,6 +175,22 @@ describe('pi-tps extension — rehydration', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
   });
 
+  it('should restore from the active branch instead of an abandoned branch', async () => {
+    const { handlers, notifySpy, mockEntries, mockCtx } = fixture;
+    const activeEntry = makeTpsEntry({ tps: 10.0 });
+    const abandonedEntry = makeTpsEntry({ tps: 99.0 });
+    mockEntries.push(activeEntry, abandonedEntry);
+    (mockCtx.sessionManager.getBranch as ReturnType<typeof vi.fn>).mockReturnValue([activeEntry]);
+
+    handlers['session_tree']?.({ newLeafId: 'active', oldLeafId: 'abandoned' }, mockCtx);
+    await tick();
+
+    expect(notifySpy).toHaveBeenCalledOnce();
+    const msg = notifySpy.mock.calls[0][0] as string;
+    expect(msg).toContain('TPS 10.0');
+    expect(msg).not.toContain('TPS 99.0');
+  });
+
   it('should rehydrate most recent entry, preferring structured over legacy', async () => {
     const { handlers, notifySpy, mockEntries } = fixture;
 
