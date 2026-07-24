@@ -1,0 +1,10 @@
+# Belt-and-suspenders: package.json "files" is the source of truth.
+# This keeps accidental npm pack without "files" from shipping dev junk.
+
+*
+!LICENSE
+!README.md
+!package.json
+!extensions/
+!extensions/pi-tps/
+!extensions/pi-tps/index.ts

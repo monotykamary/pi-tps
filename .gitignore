@@ -1,3 +1,8 @@
 node_modules/
 coverage/
 dist/
+
+# Package managers — keep pnpm-lock.yaml for CI; never ship npm shrinkwrap
+npm-shrinkwrap.json
+package-lock.json
+*.tgz
