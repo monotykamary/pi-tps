@@ -15,11 +15,11 @@ importers:
         specifier: 21.0.1
         version: 21.0.1
       '@earendil-works/pi-ai':
-        specifier: 0.79.8
-        version: 0.79.8(ws@8.21.0)(zod@4.4.3)
+        specifier: 0.83.0
+        version: 0.83.0(ws@8.21.0)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.79.8
-        version: 0.79.8(ws@8.21.0)(zod@4.4.3)
+        specifier: 0.83.0
+        version: 0.83.0(ws@8.21.0)(zod@4.4.3)
       '@types/node':
         specifier: 25.9.1
         version: 25.9.1
@@ -267,22 +267,22 @@ packages:
       conventional-commits-parser:
         optional: true
 
-  '@earendil-works/pi-agent-core@0.79.8':
-    resolution: {integrity: sha512-8m5fcqRpoGpq3QY0I/tFXROSTmPwBb1dAuzYZO3XYgjsdCokkRMAGRjA9P8s/UD6Jy9yy69lyE4H6sz/5A1TmQ==}
+  '@earendil-works/pi-agent-core@0.83.0':
+    resolution: {integrity: sha512-RorGp9OH5l3ElpuC5a5ZQ2eWcchZGXflXRzVGkV99y3y6tT+LLNyxoYIdVKvTKWEObwhExeQbTH0fI2tE4iX4g==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-ai@0.79.8':
-    resolution: {integrity: sha512-ZpSwaD7oNpsjn9vtEatZQNT9PSdDJXi6rFeY5Qv+OHQGFDKlmcrfJE4ypm4SAc/fBECPs4Rdi3l+YjVtXYrkKw==}
-    engines: {node: '>=22.19.0'}
-    hasBin: true
-
-  '@earendil-works/pi-coding-agent@0.79.8':
-    resolution: {integrity: sha512-wr9oTS/yrwURDXnYrONQgFgV7QDlwslXL/rvKU5X7TRtrGxIhippsRApXqYlRwSeMjb2YzgHMfZ/kAhOqrzoFQ==}
+  '@earendil-works/pi-ai@0.83.0':
+    resolution: {integrity: sha512-m3IZD4g3er0V8TC9+Vpgw/sjTKqcJlkcIBy/JvsgRubuuik3tAVzyugUg4rVrShIkkOT69mEd34NEqKUIsl6JQ==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-tui@0.79.8':
-    resolution: {integrity: sha512-QerB+0wUc6eEO8MwvzOQGtzcsbwo6y8VvdxYU6vGcakz6ofJZWhrmwrknp1dCGx3bEtCf+siUIxEzkqvFCzIsg==}
+  '@earendil-works/pi-coding-agent@0.83.0':
+    resolution: {integrity: sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==}
+    engines: {node: '>=22.19.0'}
+    hasBin: true
+
+  '@earendil-works/pi-tui@0.83.0':
+    resolution: {integrity: sha512-IoYrb0rORjELmEpNtoCA/U8je3KopMkRAVJRdSzvXRvgb+Huo1gNh8Q5CSZvNOiYtDxJdj2tYZZHZ4B3+IN3hA==}
     engines: {node: '>=22.19.0'}
 
   '@emnapi/core@1.10.0':
@@ -1135,6 +1135,7 @@ packages:
   git-raw-commits@5.0.1:
     resolution: {integrity: sha512-Y+csSm2GD/PCSh6Isd/WiMjNAydu0VBiG9J7EdQsNA5P9uXvLayqjmTsNlK5Gs9IhblFZqOU0yid5Il5JPoLiQ==}
     engines: {node: '>=18'}
+    deprecated: Deprecated and no longer maintained. Use @conventional-changelog/git-client instead.
     hasBin: true
 
   glob@13.0.6:
@@ -1630,8 +1631,8 @@ packages:
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
-  typebox@1.1.38:
-    resolution: {integrity: sha512-pZ0aQPmMmXoUvSbeuWf/Hzsc+avNw/Zd6VeE8CFgkVGWyuHPJvqeJJDeJqLve+K70LvjYIoleGcoJHPT17cWoA==}
+  typebox@1.3.7:
+    resolution: {integrity: sha512-meKuifc33Pccx0O6PdIzYMq3Og8zvP4TIi/a+Bw3AEMZMxOD0+RHGQvpglEe6Zdy3wZ8nqn/j95h8LUZLk/6Hg==}
 
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
@@ -1853,7 +1854,7 @@ snapshots:
       '@aws-sdk/types': 3.973.13
       '@smithy/core': 3.25.1
       '@smithy/fetch-http-handler': 5.5.1
-      '@smithy/node-http-handler': 4.7.3
+      '@smithy/node-http-handler': 4.8.1
       '@smithy/types': 4.15.0
       tslib: 2.8.1
 
@@ -2170,11 +2171,12 @@ snapshots:
     optionalDependencies:
       conventional-commits-parser: 6.4.0
 
-  '@earendil-works/pi-agent-core@0.79.8(ws@8.21.0)(zod@4.4.3)':
+  '@earendil-works/pi-agent-core@0.83.0(ws@8.21.0)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-ai': 0.79.8(ws@8.21.0)(zod@4.4.3)
+      '@earendil-works/pi-ai': 0.83.0(ws@8.21.0)(zod@4.4.3)
+      diff: 8.0.4
       ignore: 7.0.5
-      typebox: 1.1.38
+      typebox: 1.3.7
       yaml: 2.9.0
     transitivePeerDependencies:
       - '@modelcontextprotocol/sdk'
@@ -2184,7 +2186,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@0.79.8(ws@8.21.0)(zod@4.4.3)':
+  '@earendil-works/pi-ai@0.83.0(ws@8.21.0)(zod@4.4.3)':
     dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@4.4.3)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
@@ -2196,7 +2198,7 @@ snapshots:
       https-proxy-agent: 7.0.6
       openai: 6.26.0(ws@8.21.0)(zod@4.4.3)
       partial-json: 0.1.7
-      typebox: 1.1.38
+      typebox: 1.3.7
     transitivePeerDependencies:
       - '@modelcontextprotocol/sdk'
       - bufferutil
@@ -2205,11 +2207,11 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-coding-agent@0.79.8(ws@8.21.0)(zod@4.4.3)':
+  '@earendil-works/pi-coding-agent@0.83.0(ws@8.21.0)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-agent-core': 0.79.8(ws@8.21.0)(zod@4.4.3)
-      '@earendil-works/pi-ai': 0.79.8(ws@8.21.0)(zod@4.4.3)
-      '@earendil-works/pi-tui': 0.79.8
+      '@earendil-works/pi-agent-core': 0.83.0(ws@8.21.0)(zod@4.4.3)
+      '@earendil-works/pi-ai': 0.83.0(ws@8.21.0)(zod@4.4.3)
+      '@earendil-works/pi-tui': 0.83.0
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
       cross-spawn: 7.0.6
@@ -2222,7 +2224,7 @@ snapshots:
       minimatch: 10.2.5
       proper-lockfile: 4.1.2
       semver: 7.8.0
-      typebox: 1.1.38
+      typebox: 1.3.7
       undici: 8.5.0
       yaml: 2.9.0
     optionalDependencies:
@@ -2235,7 +2237,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-tui@0.79.8':
+  '@earendil-works/pi-tui@0.83.0':
     dependencies:
       get-east-asian-width: 1.6.0
       marked: 18.0.5
@@ -3426,7 +3428,7 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  typebox@1.1.38: {}
+  typebox@1.3.7: {}
 
   typescript@6.0.3: {}
 
