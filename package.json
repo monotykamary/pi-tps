@@ -47,11 +47,5 @@
     "@earendil-works/pi-ai": ">=0.74.0",
     "@earendil-works/pi-coding-agent": ">=0.74.0"
   },
-  "overrides": {
-    "brace-expansion": "5.0.6",
-    "fast-xml-builder": "1.2.0",
-    "protobufjs": "8.4.0",
-    "ws": "8.20.1"
-  },
   "packageManager": "pnpm@11.18.0"
 }
