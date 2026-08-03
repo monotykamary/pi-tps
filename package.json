@@ -53,5 +53,5 @@
     "protobufjs": "8.4.0",
     "ws": "8.20.1"
   },
-  "packageManager": "pnpm@11.18.0"
+  "packageManager": "pnpm@11.20.0"
 }
