@@ -6,13 +6,19 @@
     "pi-package"
   ],
   "license": "MIT",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "extensions/pi-tps/index.ts"
+  ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint:dead": "knip --no-gitignore",
-    "postinstall": "simple-git-hooks 2>/dev/null || true"
+    "pack:check": "npm pack --dry-run",
+    "prepare": "simple-git-hooks 2>/dev/null || true"
   },
   "pi": {
     "extensions": [

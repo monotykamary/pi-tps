@@ -53,6 +53,8 @@ Or install from GitHub:
 pi install https://github.com/monotykamary/pi-tps
 ```
 
+The published npm package is intentionally slim: only `extensions/pi-tps/index.ts`, `README.md`, and `LICENSE`. It has **no runtime `dependencies`** and does **not** ship `npm-shrinkwrap.json` / lockfiles, so installs do not pull the multi-hundred-MB developer toolchain into `~/.pi/agent/npm`.
+
 <details>
 <summary>Manual install</summary>
 
@@ -234,18 +236,23 @@ When `cost` is unavailable (provider doesn't report it), the entire `cost` objec
 
 ## Testing
 
+Dev tooling (vitest, typescript, hooks) stays in the git repo only — use `pnpm` for local development.
+
 ```bash
-# Install dependencies
-npm install
+# Install dev dependencies (repo checkout only)
+pnpm install
 
 # Run tests
-npm test
+pnpm test
 
 # Run tests with coverage
-npm run test:coverage
+pnpm test:coverage
 
 # Type check
-npm run typecheck
+pnpm typecheck
+
+# Verify published tarball contents (should be ~3 runtime files)
+pnpm pack:check
 ```
 
 ---
