@@ -240,19 +240,19 @@ Dev tooling (vitest, typescript, hooks) stays in the git repo only — use `pnpm
 
 ```bash
 # Install dev dependencies (repo checkout only)
-pnpm install
+bun install
 
 # Run tests
-pnpm test
+bun run test
 
 # Run tests with coverage
-pnpm test:coverage
+bun run test:coverage
 
 # Type check
-pnpm typecheck
+bun run typecheck
 
 # Verify published tarball contents (should be ~3 runtime files)
-pnpm pack:check
+bun run pack:check
 ```
 
 ---
