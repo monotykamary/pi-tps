@@ -11,6 +11,10 @@ _Generation speed, TTFT, stall detection, and cost — after every agent turn._
 
 </div>
 
+## Pi 1.0 compatibility (1.3.15)
+
+Development SDKs are pinned to **1.0.0**; host-provided dependencies remain wildcard peers. Run `bun run test:pi` for offline real-host registrations, prompt/tool loadouts, nested calls, reload and shutdown. Set `PI1_HOST_PACKAGE` to an installed Pi package directory and `PI1_HOST_ENTRY=bundle` to check its bundled runtime.
+
 ---
 
 _Originally from [badlogic/pi-mono](https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts). Packaged as an installable pi extension._
