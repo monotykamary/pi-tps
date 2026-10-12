@@ -1,5 +1,6 @@
+import { writeFileSync } from 'fs';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createTestFixture, activateExtension, tick } from './helpers';
+import { createTestFixture, activateExtension, tick, withIsolatedDisplayConfig } from './helpers';
 
 describe('pi-tps extension — rehydration', () => {
   let fixture: ReturnType<typeof createTestFixture>;
@@ -278,5 +279,26 @@ describe('pi-tps extension — rehydration', () => {
     expect(notifySpy).toHaveBeenCalledOnce();
     const msg = notifySpy.mock.calls[0][0];
     expect(msg).toContain('TPS 37.9');
+  });
+
+  it('should restore the batched summary instead of the latest turn when display mode is not every', async () => {
+    const { handlers, notifySpy, mockEntries } = fixture;
+    const summary = makeTpsEntry({ input: 4, output: 6, total: 10, tps: 12 });
+    summary.customType = 'tps-summary';
+    (summary.data as { turns?: number }).turns = 2;
+
+    await withIsolatedDisplayConfig(async () => {
+      writeFileSync(process.env.PI_TPS_CONFIG!, JSON.stringify({ mode: 'settle', interval: 5 }));
+      mockEntries.push(summary, makeTpsEntry({ input: 9, output: 9, total: 18, tps: 1 }));
+
+      handlers['session_start']?.({ reason: 'resume' }, fixture.mockCtx);
+      await tick();
+
+      expect(notifySpy).toHaveBeenCalledOnce();
+      const banner = notifySpy.mock.calls[0][0] as string;
+      expect(banner).toMatch(/turns 2/);
+      expect(banner).toMatch(/out 6/);
+      expect(banner).not.toMatch(/out 9/);
+    });
   });
 });

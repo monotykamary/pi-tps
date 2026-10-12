@@ -6,15 +6,19 @@
  * stalls (GPU queuing / request queuing pauses), and persists telemetry
  * as custom entries in the session JSONL for provider debugging.
  *
+ * The banner is configurable with `/tps`: every turn (default), once when the
+ * agent settles, or every N turns. Telemetry is recorded on every turn either way.
+ *
  * Originally from: https://github.com/badlogic/pi-mono/blob/main/.pi/extensions/tps.ts
  */
 
 import { execSync } from 'child_process';
-import { writeFileSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
 import type { AssistantMessage } from '@earendil-works/pi-ai';
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -67,6 +71,11 @@ interface ToolExecutionStartEvent {
   args: unknown;
 }
 
+interface AgentSettledEvent {
+  type: 'agent_settled';
+  aborted: boolean;
+}
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Minimum gap between token updates to count as a stall (ms) */
@@ -74,6 +83,124 @@ const STALL_THRESHOLD_MS = 500;
 
 /** Event name emitted by pi-neuralwatt-provider per turn with energy-billed cost data. */
 const NEURALWATT_ENERGY_EVENT = 'neuralwatt:turn-energy';
+
+/** How often the banner is shown. Telemetry is still recorded on every turn. */
+export type DisplayMode = 'every' | 'settle' | 'interval';
+
+export interface DisplayConfig {
+  /** `every`: each turn. `settle`: once at agent_settled. `interval`: every `interval` turns. */
+  mode: DisplayMode;
+  /** Used when mode is `interval`. Integer ≥ 1. */
+  interval: number;
+}
+
+export const DEFAULT_DISPLAY_CONFIG: DisplayConfig = {
+  mode: 'every',
+  interval: 5,
+};
+
+const DISPLAY_MODES: readonly DisplayMode[] = ['every', 'settle', 'interval'];
+const DISPLAY_USAGE = 'Usage: /tps | /tps mode every|settle|interval [N] | /tps interval N';
+
+function isDisplayMode(value: unknown): value is DisplayMode {
+  return typeof value === 'string' && (DISPLAY_MODES as readonly string[]).includes(value);
+}
+
+/** `PI_TPS_CONFIG` overrides the default `~/.pi/agent/pi-tps.json` path. */
+export function displayConfigPath(): string {
+  const override = process.env.PI_TPS_CONFIG?.trim();
+  if (override) return override;
+  return join(getAgentDir(), 'pi-tps.json');
+}
+
+export function normalizeDisplayConfig(raw: unknown): DisplayConfig {
+  const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const mode = isDisplayMode(obj.mode) ? obj.mode : DEFAULT_DISPLAY_CONFIG.mode;
+  const intervalRaw = typeof obj.interval === 'number' ? obj.interval : Number(obj.interval);
+  const interval =
+    Number.isInteger(intervalRaw) && intervalRaw >= 1
+      ? intervalRaw
+      : DEFAULT_DISPLAY_CONFIG.interval;
+  return { mode, interval };
+}
+
+export function loadDisplayConfig(path = displayConfigPath()): DisplayConfig {
+  if (!existsSync(path)) return { ...DEFAULT_DISPLAY_CONFIG };
+  try {
+    return normalizeDisplayConfig(JSON.parse(readFileSync(path, 'utf-8')));
+  } catch {
+    return { ...DEFAULT_DISPLAY_CONFIG };
+  }
+}
+
+export function saveDisplayConfig(config: DisplayConfig, path = displayConfigPath()): void {
+  const normalized = normalizeDisplayConfig(config);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(normalized, null, 2)}\n`);
+}
+
+export function describeDisplayConfig(config: DisplayConfig): string {
+  if (config.mode === 'every') return 'every turn';
+  if (config.mode === 'settle') return 'on settle';
+  return `every ${config.interval} turns`;
+}
+
+/**
+ * Apply a `/tps` argument string to the current display config.
+ * An empty argument reports the current config and does not change it.
+ */
+export function applyDisplayCommand(
+  args: string,
+  current: DisplayConfig
+): { config: DisplayConfig; message: string } | { error: string } {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) {
+    return {
+      config: current,
+      message: `pi-tps display: ${describeDisplayConfig(current)} · ${displayConfigPath()}`,
+    };
+  }
+
+  const next: DisplayConfig = { ...current };
+  let modeToken: string | undefined;
+  let intervalToken: string | undefined;
+
+  if (tokens[0] === 'mode') {
+    modeToken = tokens[1];
+    intervalToken = tokens[2];
+    if (!modeToken || tokens.length > 3) return { error: DISPLAY_USAGE };
+  } else if (tokens[0] === 'interval' && tokens[1] !== undefined && !isDisplayMode(tokens[1])) {
+    modeToken = 'interval';
+    intervalToken = tokens[1];
+    if (tokens.length > 2) return { error: DISPLAY_USAGE };
+  } else if (tokens[0] === 'interval') {
+    modeToken = 'interval';
+    if (tokens.length > 1) return { error: DISPLAY_USAGE };
+  } else if (isDisplayMode(tokens[0])) {
+    modeToken = tokens[0];
+    intervalToken = tokens[1];
+    if (tokens.length > 2) return { error: DISPLAY_USAGE };
+  } else {
+    return { error: DISPLAY_USAGE };
+  }
+
+  if (!isDisplayMode(modeToken)) return { error: DISPLAY_USAGE };
+  next.mode = modeToken;
+
+  if (intervalToken !== undefined) {
+    if (next.mode !== 'interval') return { error: DISPLAY_USAGE };
+    const n = Number(intervalToken);
+    if (!Number.isInteger(n) || n < 1) {
+      return { error: `Interval must be an integer ≥ 1, got "${intervalToken}"` };
+    }
+    next.interval = n;
+  }
+
+  return {
+    config: next,
+    message: `pi-tps display: ${describeDisplayConfig(next)} · saved ${displayConfigPath()}`,
+  };
+}
 
 // ─── Data types ─────────────────────────────────────────────────────────────
 
@@ -285,7 +412,7 @@ export function formatDuration(totalSeconds: number): string {
 /**
  * Compose the human-readable display string from structured telemetry.
  */
-function composeDisplayString(t: TurnTelemetry): string {
+function composeDisplayString(t: TurnTelemetry, turns?: number): string {
   const parts: string[] = [];
   parts.push(t.tps !== null ? `TPS ${t.tps.toFixed(1)} tok/s` : 'TPS —');
   if (t.timing.ttftMs !== null) {
@@ -294,6 +421,9 @@ function composeDisplayString(t: TurnTelemetry): string {
   parts.push(formatDuration(t.timing.totalMs / 1000));
   parts.push(`in ${formatNumber(t.tokens.input)}`);
   parts.push(`out ${formatNumber(t.tokens.output)}`);
+  if (turns !== undefined && turns > 1) {
+    parts.push(`turns ${turns}`);
+  }
   if (t.timing.stallMs > 0) {
     const stallStr = formatDuration(t.timing.stallMs / 1000);
     parts.push(`stall ${stallStr}×${t.timing.stallCount}`);
@@ -302,6 +432,105 @@ function composeDisplayString(t: TurnTelemetry): string {
     parts.push(`$${t.rateUsdPerMTokens.toFixed(2)}/M`);
   }
   return parts.join(' · ');
+}
+
+/**
+ * Fold several turns into one banner. TPS and $/M are output- and token-weighted.
+ * `totalMsOverride` replaces the summed per-turn clocks (used for settle wall time).
+ */
+function aggregateTelemetry(turns: TurnTelemetry[], totalMsOverride?: number): TurnTelemetry {
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let total = 0;
+  let costInput = 0;
+  let costOutput = 0;
+  let costCacheRead = 0;
+  let costCacheWrite = 0;
+  let costTotal = 0;
+  let hasCost = false;
+  let stallMs = 0;
+  let stallCount = 0;
+  let messageCount = 0;
+  let generationMs = 0;
+  let streamMs = 0;
+  let hasStream = false;
+  let totalMs = 0;
+  let ttftMs: number | null = null;
+  let weightedTps = 0;
+  let tpsWeight = 0;
+  let ratedTokens = 0;
+  let weightedRate = 0;
+  let primaryVotes = 0;
+  let nonPrimaryVotes = 0;
+
+  for (const turn of turns) {
+    input += turn.tokens.input;
+    output += turn.tokens.output;
+    cacheRead += turn.tokens.cacheRead;
+    cacheWrite += turn.tokens.cacheWrite;
+    total += turn.tokens.total;
+    if (turn.cost) {
+      hasCost = true;
+      costInput += turn.cost.input;
+      costOutput += turn.cost.output;
+      costCacheRead += turn.cost.cacheRead;
+      costCacheWrite += turn.cost.cacheWrite;
+      costTotal += turn.cost.total;
+    }
+    stallMs += turn.timing.stallMs;
+    stallCount += turn.timing.stallCount;
+    messageCount += turn.timing.messageCount;
+    generationMs += turn.timing.generationMs;
+    totalMs += turn.timing.totalMs;
+    if (turn.timing.streamMs !== null) {
+      hasStream = true;
+      streamMs += turn.timing.streamMs;
+    }
+    if (ttftMs === null && turn.timing.ttftMs !== null) ttftMs = turn.timing.ttftMs;
+    if (turn.tps !== null && turn.tokens.output > 0) {
+      weightedTps += turn.tps * turn.tokens.output;
+      tpsWeight += turn.tokens.output;
+      if (turn.isPrimaryBranch) primaryVotes += 1;
+      else nonPrimaryVotes += 1;
+    }
+    if (turn.rateUsdPerMTokens != null && turn.tokens.total > 0) {
+      weightedRate += turn.rateUsdPerMTokens * turn.tokens.total;
+      ratedTokens += turn.tokens.total;
+    }
+  }
+
+  const tps = tpsWeight > 0 ? Math.round((weightedTps / tpsWeight) * 10) / 10 : null;
+  const rateUsdPerMTokens =
+    ratedTokens > 0 ? Math.round((weightedRate / ratedTokens) * 100) / 100 : null;
+
+  return {
+    model: turns[turns.length - 1]?.model ?? turns[0].model,
+    tokens: { input, output, cacheRead, cacheWrite, total },
+    timing: {
+      ttftMs,
+      totalMs: totalMsOverride ?? totalMs,
+      generationMs,
+      streamMs: hasStream ? streamMs : null,
+      stallMs,
+      stallCount,
+      messageCount,
+    },
+    tps,
+    isPrimaryBranch: tps !== null && primaryVotes > 0 && nonPrimaryVotes === 0,
+    cost: hasCost
+      ? {
+          input: costInput,
+          output: costOutput,
+          cacheRead: costCacheRead,
+          cacheWrite: costCacheWrite,
+          total: costTotal,
+        }
+      : null,
+    rateUsdPerMTokens,
+    timestamp: Date.now(),
+  };
 }
 
 /**
@@ -550,6 +779,28 @@ export default function tpsExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext;
   } | null = null;
 
+  // Banner gating. Telemetry is always persisted; only the notification is deferred.
+  let displayConfig = loadDisplayConfig();
+  let displayBuffer: Array<{ turnIndex: number; telemetry: TurnTelemetry }> = [];
+  let turnsSinceDisplay = 0;
+  // Wall clock for the current settle window. Set on the first turn after a settle.
+  let runWallStartMs: number | null = null;
+
+  function flushDisplay(ctx: ExtensionContext, totalMsOverride?: number) {
+    const batch = displayBuffer;
+    displayBuffer = [];
+    turnsSinceDisplay = 0;
+    if (batch.length === 0) return;
+
+    const turns = batch.map((item) => item.telemetry);
+    const summary = aggregateTelemetry(turns, totalMsOverride);
+    if (ctx.hasUI) {
+      ctx.ui.notify(composeDisplayString(summary, turns.length), 'info');
+    }
+    pi.appendEntry('tps-summary', { ...summary, turns: turns.length });
+    cachedEntries.push({ type: 'custom', customType: 'tps-summary' });
+  }
+
   pi.events?.on(NEURALWATT_ENERGY_EVENT, (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
     const p = payload as Record<string, unknown>;
@@ -578,10 +829,13 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
     const corrected = { ...committed.telemetry, rateUsdPerMTokens: correctedRate };
     committed.telemetry = corrected;
+    const buffered = displayBuffer.find((item) => item.turnIndex === committed.turnIndex);
+    if (buffered) buffered.telemetry = corrected;
     pi.appendEntry('tps', corrected);
     pi.events?.emit('tps:telemetry', corrected);
     cachedEntries.push({ type: 'custom', customType: 'tps' });
-    if (committed.ctx.hasUI) {
+    // A deferred banner still holds this turn; don't pop a second notification.
+    if (committed.ctx.hasUI && displayConfig.mode === 'every') {
       committed.ctx.ui.notify(composeDisplayString(corrected), 'info');
     }
   });
@@ -597,6 +851,20 @@ export default function tpsExtension(pi: ExtensionAPI) {
   function restoreTPSNotification(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
     const entries = ctx.sessionManager.getBranch();
+    if (displayConfig.mode !== 'every') {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (entry.type !== 'custom' || entry.customType !== 'tps-summary') continue;
+        const data = entry.data as Record<string, unknown> | null;
+        if (!data?.model) continue;
+        const turns = typeof data.turns === 'number' ? data.turns : undefined;
+        const message = composeDisplayString(data as unknown as TurnTelemetry, turns);
+        setTimeout(() => {
+          ctx.ui.notify(message, 'info');
+        }, 0);
+        return;
+      }
+    }
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'tps') {
@@ -623,6 +891,10 @@ export default function tpsExtension(pi: ExtensionAPI) {
 
   // Restore notification on session start/resume — skip only brand-new sessions
   pi.on('session_start', (_event, ctx) => {
+    displayConfig = loadDisplayConfig();
+    displayBuffer = [];
+    turnsSinceDisplay = 0;
+    runWallStartMs = null;
     cachedEntries = ctx.sessionManager.getEntries();
     restoreTPSNotification(ctx);
   });
@@ -631,8 +903,26 @@ export default function tpsExtension(pi: ExtensionAPI) {
   pi.on('session_tree', (_event: SessionTreeEvent, ctx: ExtensionContext) => {
     pendingNeuralwattBilledCost = null;
     lastCommittedTurn = null;
+    displayConfig = loadDisplayConfig();
+    displayBuffer = [];
+    turnsSinceDisplay = 0;
+    runWallStartMs = null;
     cachedEntries = ctx.sessionManager.getEntries();
     restoreTPSNotification(ctx);
+  });
+
+  // Final boundary for one user-visible run, after retries and queued follow-ups.
+  // settle flushes the whole run. interval flushes a partial window and recounts from zero.
+  pi.on('agent_settled', (_event: AgentSettledEvent, ctx: ExtensionContext) => {
+    const wallStart = runWallStartMs;
+    runWallStartMs = null;
+    if (displayBuffer.length === 0) return;
+    if (displayConfig.mode === 'settle') {
+      const totalMs = wallStart !== null ? Math.max(0, performance.now() - wallStart) : undefined;
+      flushDisplay(ctx, totalMs);
+      return;
+    }
+    if (displayConfig.mode === 'interval') flushDisplay(ctx);
   });
 
   // ── Turn timing ─────────────────────────────────────────────────────────
@@ -641,9 +931,12 @@ export default function tpsExtension(pi: ExtensionAPI) {
   pi.on('turn_start', (_event: TurnStartEvent) => {
     pendingNeuralwattBilledCost = null;
     lastCommittedTurn = null;
+    const turnStartMs = performance.now();
+    // Reuse this sample so settle wall-clock does not add a performance.now() call.
+    if (runWallStartMs === null) runWallStartMs = turnStartMs;
     currentTiming = {
       turnIndex: _event.turnIndex,
-      turnStartMs: performance.now(),
+      turnStartMs,
       turnStartTimestamp: typeof _event.timestamp === 'number' ? _event.timestamp : Date.now(),
       lastUpdateMs: performance.now(),
       firstTokenMs: null,
@@ -821,14 +1114,64 @@ export default function tpsExtension(pi: ExtensionAPI) {
     // Emit event so other extensions can react to new telemetry
     pi.events.emit('tps:telemetry', telemetry);
 
-    // Show notification only when UI is available
-    if (ctx.hasUI) {
-      const message = composeDisplayString(telemetry);
-      ctx.ui.notify(message, 'info');
+    if (displayConfig.mode === 'every') {
+      if (ctx.hasUI) {
+        ctx.ui.notify(composeDisplayString(telemetry), 'info');
+      }
+    } else {
+      displayBuffer.push({ turnIndex: event.turnIndex, telemetry });
+      if (displayConfig.mode === 'interval') {
+        turnsSinceDisplay += 1;
+        if (turnsSinceDisplay >= displayConfig.interval) {
+          flushDisplay(ctx);
+        }
+      }
     }
 
     // Keep argument completion cache in sync with new entries
     cachedEntries.push({ type: 'custom', customType: 'tps' });
+  });
+
+  pi.registerCommand('tps', {
+    description: 'Configure when the TPS banner is shown: every turn, on settle, or every N turns',
+    getArgumentCompletions: (argumentPrefix: string) => {
+      const options = [
+        { value: 'mode', label: 'mode every|settle|interval' },
+        { value: 'every', label: 'every — show after every turn' },
+        { value: 'settle', label: 'settle — show when the agent settles' },
+        { value: 'interval', label: 'interval [N] — show every N turns' },
+      ];
+      return options.filter((option) => option.value.startsWith(argumentPrefix));
+    },
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const result = applyDisplayCommand(args, displayConfig);
+      if ('error' in result) {
+        ctx.ui.notify(result.error, 'warning');
+        return;
+      }
+      if (!args.trim()) {
+        ctx.ui.notify(result.message, 'info');
+        return;
+      }
+
+      const previous = displayConfig;
+      displayConfig = result.config;
+      try {
+        saveDisplayConfig(displayConfig);
+      } catch (err) {
+        displayConfig = previous;
+        ctx.ui.notify(`Could not save pi-tps config: ${String(err)}`, 'warning');
+        return;
+      }
+
+      const hadPending = displayBuffer.length > 0;
+      displayBuffer = [];
+      turnsSinceDisplay = 0;
+      ctx.ui.notify(
+        hadPending ? `${result.message} · pending batch cleared` : result.message,
+        'info'
+      );
+    },
   });
 
   // ── Export commands ─────────────────────────────────────────────────────

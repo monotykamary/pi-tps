@@ -41,6 +41,7 @@ pi install npm:@monotykamary/pi-tps
 - **Burst discrimination**: Distinguishes genuine streaming from buffer-flush dispatch; shows `—` when the rate is structurally unidentifiable
 - **Multi-message turns**: Aggregates tokens and timing across tool-call chains within one turn
 - **Notification banner**: Shows a transient popup with TPS, TTFT, total time, tokens, and stalls
+- **Configurable display**: `/tps` chooses every turn (default), once when the agent settles, or every N turns
 - **Persisted notifications**: Restored on session resume and `/tree` navigation (structured + legacy backward compatible)
 - **Export command**: Dump telemetry as JSONL with automatic tree re-chaining for web inspectors
 - **Extensible**: Emits `tps:telemetry` events so other extensions can react to telemetry
@@ -86,6 +87,7 @@ TPS 42.5 tok/s · TTFT 1.2s · 29.7s · in 567 · out 1.2K · stall 4.3s×1 · $
 | `in`    | Input tokens (human-readable: K/M/B)                                                     |
 | `out`   | Output tokens (human-readable: K/M/B)                                                    |
 | `stall` | Accumulated stall time × stall count (shown only when stalls exist)                      |
+| `turns` | Turn count in a batched banner (`settle` / `interval`); omitted for a single turn        |
 | `$/M`   | Blended $/million-tokens rate for this turn (shown only when a cost source is available) |
 
 When TPS can't be determined (burst delivery, too few chunks), the field shows `—`:
@@ -115,6 +117,33 @@ Duration formatting:
 
 - `< 60s`: one decimal (`2.3s`, `45.0s`)
 - `≥ 60s`: up to two units with no decimals (`1m 30s`, `2h 15m`, `3d 12h`, `1w 3d`, `1mo 0d`, `1y 0d`)
+
+---
+
+## Display
+
+The banner shows after every turn unless you change it. `/tps` writes `~/.pi/agent/pi-tps.json` and the next session start reloads it. The in-memory setting applies immediately.
+
+```text
+/tps                  # show the current mode
+/tps mode every       # show after every turn (default)
+/tps mode settle      # show once when the agent settles
+/tps mode interval 5  # show every 5 tracked turns
+/tps interval 5       # same as `mode interval 5`
+/tps settle           # same as `mode settle`
+```
+
+| Mode       | When the banner appears                                                                                                                   |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `every`    | After each turn. This is the default, so existing sessions stay unchanged.                                                                |
+| `settle`   | Once, on `agent_settled`. Not after each turn, and not on `agent_end` — retries, compaction recovery, and queued follow-ups are included. |
+| `interval` | Every N tracked turns. A partial window is flushed on `agent_settled`, then the count starts over.                                        |
+
+`settle` and `interval` show one aggregated banner for the turns since the last banner. Tokens, stalls, and cost are summed. TPS and `$/M` are weighted. `settle` uses wall-clock time from the window's first turn to settle, so tool time between turns is included. `interval` sums each turn's own clock. On `agent_settled` it flushes any remainder and starts the next window at zero, so a short run still gets a banner and the next run does not inherit the count.
+
+Changing the mode clears a pending batch. Per-turn telemetry is still appended and emitted as `tps:telemetry` in every mode. A batched banner is also stored as a `tps-summary` entry and restored on resume when the mode is not `every`.
+
+`PI_TPS_CONFIG` overrides the config file path.
 
 ---
 

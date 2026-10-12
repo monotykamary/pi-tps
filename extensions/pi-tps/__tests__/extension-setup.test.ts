@@ -23,6 +23,14 @@ describe('pi-tps extension — setup', () => {
     expect(mockPi.on).toHaveBeenCalledWith('message_update', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('message_end', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('turn_end', expect.any(Function));
+    expect(mockPi.on).toHaveBeenCalledWith('agent_settled', expect.any(Function));
+    expect(registerCommandSpy).toHaveBeenCalledWith(
+      'tps',
+      expect.objectContaining({
+        description: expect.any(String),
+        handler: expect.any(Function),
+      })
+    );
     expect(registerCommandSpy).toHaveBeenCalledWith(
       'tps-export',
       expect.objectContaining({
