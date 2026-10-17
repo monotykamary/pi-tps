@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `/tps` display modes: every turn (default), once on `agent_settled`, or every N turns. Interval flushes a partial window on settle and recounts.
+- Keep per-turn telemetry persistence and `tps:telemetry` events in every display mode.
+
 ## 1.3.15
 
 - Pin development SDKs to Pi 1.0.0 while retaining host-owned wildcard peers.

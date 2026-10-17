@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi } from 'vitest';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
@@ -170,8 +173,28 @@ export function createTestFixture(): TestFixture {
   };
 }
 
+/** Keep tests off the user's real ~/.pi/agent/pi-tps.json. */
+function defaultTestConfigPath(): string {
+  return join(mkdtempSync(join(tmpdir(), 'pi-tps-default-')), 'missing.json');
+}
+
 /** Import the extension module and wire it to the test fixture's mockPi */
 export async function activateExtension(fixture: TestFixture) {
+  if (!process.env.PI_TPS_CONFIG) process.env.PI_TPS_CONFIG = defaultTestConfigPath();
   const { default: tpsExtension } = await import('../index.js');
   tpsExtension(fixture.mockPi as ExtensionAPI);
+}
+
+/** Point /tps config at a temp file for one test, then restore the previous path. */
+export async function withIsolatedDisplayConfig(run: () => Promise<void>) {
+  const previous = process.env.PI_TPS_CONFIG;
+  const dir = mkdtempSync(join(tmpdir(), 'pi-tps-config-'));
+  process.env.PI_TPS_CONFIG = join(dir, 'pi-tps.json');
+  try {
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.PI_TPS_CONFIG;
+    else process.env.PI_TPS_CONFIG = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 }

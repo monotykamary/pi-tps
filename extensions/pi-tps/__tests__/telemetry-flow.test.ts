@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import { createTestFixture, activateExtension, tick, makeAssistantMessage } from './helpers';
+import {
+  createTestFixture,
+  activateExtension,
+  tick,
+  makeAssistantMessage,
+  withIsolatedDisplayConfig,
+} from './helpers';
 import type {
   TurnStartEvent,
   TurnEndEvent,
@@ -650,5 +656,90 @@ describe('pi-tps extension — telemetry flow', () => {
 
     expect(notifySpy).not.toHaveBeenCalled();
     expect(appendEntrySpy).not.toHaveBeenCalled();
+  });
+
+  // ── Display modes ────────────────────────────────────────────────────────
+
+  function driveShortTurn(turnIndex: number, tokens: { input: number; output: number }) {
+    const message = makeAssistantMessage(tokens);
+    fixture.handlers['turn_start']?.({
+      type: 'turn_start',
+      turnIndex,
+      timestamp: Date.now(),
+    });
+    fixture.handlers['message_start']?.({ type: 'message_start', message });
+    fixture.handlers['message_update']?.({ type: 'message_update', message });
+    fixture.handlers['message_end']?.({ type: 'message_end', message });
+    fixture.handlers['turn_end']?.(
+      { type: 'turn_end', turnIndex, message, toolResults: [] },
+      fixture.mockCtx
+    );
+  }
+
+  it('should defer the banner until the agent settles and aggregate the run', async () => {
+    await withIsolatedDisplayConfig(async () => {
+      await activateExtension(fixture);
+      await fixture.commands['tps'].handler('mode settle', fixture.mockCtx);
+      fixture.notifySpy.mockClear();
+      fixture.appendEntrySpy.mockClear();
+
+      driveShortTurn(0, { input: 10, output: 20 });
+      driveShortTurn(1, { input: 30, output: 40 });
+      expect(fixture.notifySpy).not.toHaveBeenCalled();
+      expect(fixture.appendEntrySpy).toHaveBeenCalledTimes(2);
+
+      fixture.handlers['agent_settled']?.(
+        { type: 'agent_settled', aborted: false },
+        fixture.mockCtx
+      );
+
+      expect(fixture.notifySpy).toHaveBeenCalledOnce();
+      const banner = fixture.notifySpy.mock.calls[0][0] as string;
+      expect(banner).toMatch(/in 40/);
+      expect(banner).toMatch(/out 60/);
+      expect(banner).toMatch(/turns 2/);
+      expect(fixture.appendEntrySpy).toHaveBeenCalledWith(
+        'tps-summary',
+        expect.objectContaining({ turns: 2 })
+      );
+    });
+  });
+
+  it('should flush a partial interval on settle and recount from zero', async () => {
+    await withIsolatedDisplayConfig(async () => {
+      await activateExtension(fixture);
+      await fixture.commands['tps'].handler('interval 3', fixture.mockCtx);
+      fixture.notifySpy.mockClear();
+
+      driveShortTurn(0, { input: 1, output: 1 });
+      driveShortTurn(1, { input: 1, output: 1 });
+      fixture.handlers['agent_settled']?.(
+        { type: 'agent_settled', aborted: false },
+        fixture.mockCtx
+      );
+      expect(fixture.notifySpy).toHaveBeenCalledOnce();
+      expect(fixture.notifySpy.mock.calls[0][0]).toMatch(/turns 2/);
+
+      fixture.notifySpy.mockClear();
+      driveShortTurn(2, { input: 1, output: 1 });
+      expect(fixture.notifySpy).not.toHaveBeenCalled();
+
+      driveShortTurn(3, { input: 1, output: 1 });
+      driveShortTurn(4, { input: 1, output: 1 });
+      expect(fixture.notifySpy).toHaveBeenCalledOnce();
+      expect(fixture.notifySpy.mock.calls[0][0]).toMatch(/turns 3/);
+    });
+  });
+
+  it('should persist the /tps display mode for the next session', async () => {
+    await withIsolatedDisplayConfig(async () => {
+      await activateExtension(fixture);
+      await fixture.commands['tps'].handler('mode interval 4', fixture.mockCtx);
+
+      const resumed = createTestFixture();
+      await activateExtension(resumed);
+      await resumed.commands['tps'].handler('', resumed.mockCtx);
+      expect(resumed.notifySpy.mock.calls[0][0]).toMatch(/every 4 turns/);
+    });
   });
 });
