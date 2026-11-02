@@ -1,4 +1,4 @@
-// Offline Pi 1.3 SDK/bundle lifecycle, identity, loadout, nested-tool and renderer probe.
+// Offline Pi 1.5 SDK/bundle lifecycle, identity, loadout, nested-tool and renderer probe.
 import assert from 'node:assert/strict';
 import { findPackageJSON } from 'node:module';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
@@ -35,15 +35,15 @@ try {
     SettingsManager,
     VERSION,
   } = sdk;
-  assert.equal(VERSION, '1.3.0', 'actual executing Pi host');
+  assert.equal(VERSION, '1.5.0', 'actual executing Pi host');
   const localSdk = await import('@earendil-works/pi-coding-agent');
-  assert.equal(localSdk.VERSION, '1.3.0', 'exact pinned development host');
+  assert.equal(localSdk.VERSION, '1.5.0', 'exact pinned development host');
   const aiPath = findPackageJSON(
     '@earendil-works/pi-ai/compat',
     pathToFileURL(join(sdk.getPackageDir(), 'package.json'))
   );
   const aiManifest = JSON.parse(await readFile(aiPath, 'utf8'));
-  assert.equal(aiManifest.version, '1.3.0');
+  assert.equal(aiManifest.version, '1.5.0');
   const ai = await import(
     pathToFileURL(join(dirname(aiPath), aiManifest.exports['./compat'].import)).href
   );
@@ -59,7 +59,7 @@ try {
     if (manifest.peerDependencies?.[name] !== undefined)
       assert.equal(manifest.peerDependencies[name], '*');
     if (manifest.devDependencies?.[name] !== undefined && name !== 'typebox')
-      assert.equal(manifest.devDependencies[name], '1.3.0');
+      assert.equal(manifest.devDependencies[name], '1.5.0');
   }
   const identityPath = join(home, 'identity.ts');
   globalThis[Symbol.for('pi1.workflow.identity')] = sdk.AgentSession;
