@@ -41,6 +41,7 @@ pi install npm:@monotykamary/pi-tps
 - **Burst discrimination**: Distinguishes genuine streaming from buffer-flush dispatch; shows `—` when the rate is structurally unidentifiable
 - **Multi-message turns**: Aggregates tokens and timing across tool-call chains within one turn
 - **Notification banner**: Shows a transient popup with TPS, TTFT, total time, tokens, and stalls
+- **Completion notification**: After the assistant fully settles, the TPS notification includes `done` and the local completion time. Aborted runs do not show it.
 - **Persisted notifications**: Restored on session resume and `/tree` navigation (structured + legacy backward compatible)
 - **Export command**: Dump telemetry as JSONL with automatic tree re-chaining for web inspectors
 - **Extensible**: Emits `tps:telemetry` events so other extensions can react to telemetry

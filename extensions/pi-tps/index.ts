@@ -550,6 +550,21 @@ export default function tpsExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext;
   } | null = null;
 
+  // A turn can end before tools, retries or queued continuations finish. Only
+  // final settlement marks the assistant response as done.
+  pi.on('before_agent_start', () => {
+    lastCommittedTurn = null;
+  });
+  pi.on('agent_settled', (event, ctx) => {
+    if (event.aborted || !ctx.hasUI) return;
+    const clock = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const done = `done ${clock}`;
+    const message = lastCommittedTurn
+      ? `${composeDisplayString(lastCommittedTurn.telemetry)} · ${done}`
+      : done;
+    ctx.ui.notify(message, 'info');
+  });
+
   pi.events?.on(NEURALWATT_ENERGY_EVENT, (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
     const p = payload as Record<string, unknown>;
