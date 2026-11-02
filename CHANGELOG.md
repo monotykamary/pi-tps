@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.19
+
+- Show the local completion time in the TPS notification after the assistant fully settles.
+
 ## 1.3.15
 
 - Pin development SDKs to Pi 1.0.0 while retaining host-owned wildcard peers.
